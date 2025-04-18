@@ -1,47 +1,108 @@
 // routes/dataRoutes.js
 const express = require('express');
-const router = express.Router();
-const Data = require('../models/Data');
+const router  = express.Router();
+const Survey = require('../models/Survey');
+const Response = require('../models/Response');
 
 // PUT /api/data
-// Recebe um JSON com { data: [ ... ] } e salva cada item como documento
+// Espera { surveyInfo: { name, month?, year?, variables? }, data: [ {...}, ... ] }
 router.put('/data', async (req, res) => {
   try {
-    const items = req.body.data;
-    if (!Array.isArray(items)) {
-      return res.status(400).json({ error: 'Campo "data" deve ser um array.' });
+    const { surveyInfo, data } = req.body;
+    const { fileHash } = surveyInfo;
+    if (!surveyInfo?.name) {
+      return res.status(400).json({ error: 'surveyInfo.name é obrigatório' });
     }
-    // Inserção em massa
-    const inserted = await Data.insertMany(items);
-    res.status(201).json({ insertedCount: inserted.length });
+    if (!Array.isArray(data)) {
+      return res.status(400).json({ error: 'data deve ser um array' });
+    }
+
+    // 0) se survey já existir e já tiver esse hash, rejeita
+    let existingSurvey = await Survey.findOne({ name: surveyInfo.name });
+    if (existingSurvey && fileHash && existingSurvey.fileHashes.includes(fileHash)) {
+      return res.status(409).json({
+        error: 'Este arquivo já foi processado anteriormente.',
+        fileHash
+      });
+    }
+
+    // Filtra variáveis sem chave (evita duplicatas null)
+    const variables = Array.isArray(surveyInfo.variables)
+      ? surveyInfo.variables.filter(v => v.key != null && String(v.key).trim() !== '')
+      : [];
+
+    // Upsert no Survey (cadastra ou atualiza pesquisa)
+    const survey = await Survey.findOneAndUpdate(
+      { name: surveyInfo.name },
+      {
+        $set: {
+          month: surveyInfo.month,
+          year: surveyInfo.year,
+          variables: variables
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    // Prepara respostas para inserção
+    const responses = data.map(item => {
+      // extrai entrevistadoId de item.idEntrevista (que vem como { label, value })
+      const raw = item.idEntrevista;
+      const entrevistadoId = raw && raw.value != null
+        ? String(raw.value)
+        : String(raw);
+
+      // converte cada par [chave → {label,value}] em { key,value }
+      const answers = Object.entries(item).map(([key, cell]) => ({
+        key,
+        value: cell.value
+      }));
+
+      return {
+        surveyId:       survey._id,
+        entrevistadoId,        // agora sempre string definida
+        answers,               // array de AnswerSchema
+        createdAt:      new Date()
+      };
+    });
+    const inserted = await Response.insertMany(responses);
+
+    // 4) após inserção bem‑sucedida, adiciona o hash ao survey
+    if (fileHash) {
+      await Survey.updateOne(
+        { _id: survey._id },
+        { $addToSet: { fileHashes: fileHash } }
+      );
+    }
+    return res.status(201).json({ insertedCount: inserted.length });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao salvar dados.' });
+    console.error('Erro ao salvar dados.', err);
+    return res.status(500).json({ error: 'Erro ao salvar dados.' });
   }
 });
 
-// GET /api/data
-// Retorna todos os documentos
-router.get('/data', async (req, res) => {
+// GET /api/surveys
+// Retorna lista de pesquisas cadastradas
+router.get('/surveys', async (req, res) => {
   try {
-    const all = await Data.find();
-    res.json(all);
+    const surveys = await Survey.find();
+    res.json(surveys);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao buscar dados.' });
+    console.error('Erro ao buscar surveys:', err);
+    res.status(500).json({ error: 'Erro ao buscar surveys.' });
   }
 });
 
-// GET /api/data/:idEntrevista
-// Retorna apenas o documento com o idEntrevista especificado
-router.get('/data/:idEntrevista', async (req, res) => {
+// GET /api/responses/:surveyId
+// Retorna todas as respostas de um survey específico
+router.get('/responses/:surveyId', async (req, res) => {
   try {
-    const doc = await Data.findOne({ idEntrevista: Number(req.params.idEntrevista) });
-    if (!doc) return res.status(404).json({ error: 'Não encontrado.' });
-    res.json(doc);
+    const { surveyId } = req.params;
+    const responses = await Response.find({ surveyId });
+    res.json(responses);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erro ao buscar dado.' });
+    console.error('Erro ao buscar respostas:', err);
+    res.status(500).json({ error: 'Erro ao buscar respostas.' });
   }
 });
 
