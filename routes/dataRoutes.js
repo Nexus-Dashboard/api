@@ -1,5 +1,6 @@
 // routes/dataRoutes.js
 const express = require('express');
+const mongoose = require('mongoose');
 const router  = express.Router();
 const Survey = require('../models/Survey');
 const Response = require('../models/Response');
@@ -103,6 +104,41 @@ router.get('/responses/:surveyId', async (req, res) => {
   } catch (err) {
     console.error('Erro ao buscar respostas:', err);
     res.status(500).json({ error: 'Erro ao buscar respostas.' });
+  }
+});
+
+// GET /api/responsesFlat/:surveyId
+router.get('/responsesFlat/:surveyId', async (req, res) => {
+  try {
+    const { surveyId } = req.params;
+    const pivoted = await Response.aggregate([
+      { $match: { surveyId: new mongoose.Types.ObjectId(surveyId) } },
+      {
+        $project: {
+          entrevistadoId: 1,
+          createdAt:      1,
+          answersObj: {
+            $arrayToObject: {
+              $map: {
+                input: '$answers',
+                as: 'a',
+                in: ['$$a.key', '$$a.value']
+              }
+            }
+          }
+        }
+      },
+      {
+        $replaceRoot: {
+          newRoot: { $mergeObjects: ['$$ROOT', '$answersObj'] }
+        }
+      },
+      { $project: { answers: 0, answersObj: 0, __v: 0 } }
+    ]);
+    res.json(pivoted);
+  } catch (err) {
+    console.error('Erro ao buscar respostas flatten', err);
+    res.status(500).json({ error: 'Erro ao buscar respostas flatten' });
   }
 });
 
