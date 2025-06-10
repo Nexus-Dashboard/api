@@ -1,9 +1,9 @@
-// server.js
 require("dotenv").config()
 const express = require("express")
 const cors = require("cors")
 const connectDB = require("./config/db")
 const dataRoutes = require("./routes/dataRoutes")
+const googleRoutes = require("./routes/googleRoutes")  // NOVA LINHA
 
 const app = express()
 
@@ -32,6 +32,7 @@ app.get("/", async (req, res) => {
 
 // Rotas da API
 app.use("/api", dataRoutes)
+app.use("/api/google", googleRoutes)  // NOVA LINHA
 
 // Para desenvolvimento local
 if (process.env.NODE_ENV !== "production") {
