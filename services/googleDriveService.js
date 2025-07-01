@@ -1,327 +1,522 @@
 // services/googleDriveService.js
-const googleAuth = require('../config/googleAuth');
-const XLSX = require('xlsx');
+const googleAuth = require("../config/googleAuth")
+const XLSX = require("xlsx")
 
 class GoogleDriveService {
   constructor() {
-    this.drive = null;
-    this.sheets = null;
-    this.rootFolderId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID; // ID da pasta "Telefônicas"
+    this.drive = null
+    this.sheets = null
+    this.rootFolderId = "1PA_g6SLCYe_VIn5L7sT7a2CqOOu3v01b"
+
+    // Cache para melhorar performance
+    this.cache = {
+      yearFolders: null,
+      allSurveyFiles: null,
+      fileData: new Map(),
+      questionData: new Map(),
+      lastUpdate: null,
+    }
+
+    // Configurações de performance
+    this.CACHE_DURATION = 5 * 60 * 1000 // 5 minutos
+    this.MAX_CONCURRENT_FILES = 5 // Processar 5 arquivos em paralelo
+    this.MAX_CONCURRENT_SHEETS = 3 // Processar 3 sheets em paralelo
   }
 
   async initialize() {
-    await googleAuth.initialize();
-    this.drive = googleAuth.getDrive();
-    this.sheets = googleAuth.getSheets();
+    await googleAuth.initialize()
+    this.drive = googleAuth.getDrive()
+    this.sheets = googleAuth.getSheets()
   }
 
-  // Buscar pasta raiz "Telefônicas" se não tiver ID configurado
-  async findRootFolder() {
+  // Verificar se cache é válido
+  _isCacheValid() {
+    return this.cache.lastUpdate && Date.now() - this.cache.lastUpdate < this.CACHE_DURATION
+  }
+
+  // Limpar cache
+  clearCache() {
+    this.cache = {
+      yearFolders: null,
+      allSurveyFiles: null,
+      fileData: new Map(),
+      questionData: new Map(),
+      lastUpdate: null,
+    }
+  }
+
+  // Listar todas as pastas de anos (com cache)
+  async listYearFolders() {
+    try {
+      if (this.cache.yearFolders && this._isCacheValid()) {
+        console.log("📋 Usando cache para pastas de anos")
+        return this.cache.yearFolders
+      }
+
+      console.log("🔍 Buscando pastas de anos...")
+      const response = await this.drive.files.list({
+        q: `'${this.rootFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+        fields: "files(id, name, modifiedTime)",
+        orderBy: "name",
+      })
+
+      const yearFolders = response.data.files
+        .filter((folder) => /^20\d{2}$/.test(folder.name))
+        .sort((a, b) => b.name.localeCompare(a.name))
+
+      this.cache.yearFolders = yearFolders
+      this.cache.lastUpdate = Date.now()
+
+      console.log(`✅ Encontradas ${yearFolders.length} pastas de anos`)
+      return yearFolders
+    } catch (error) {
+      console.error("Erro ao listar pastas de anos:", error)
+      throw error
+    }
+  }
+
+  // Listar arquivos de pesquisa em uma pasta específica (otimizado)
+  async listSurveyFilesInYear(yearFolderId) {
     try {
       const response = await this.drive.files.list({
-        q: "name='Telefônicas' and mimeType='application/vnd.google-apps.folder'",
-        fields: 'files(id, name)'
-      });
+        q: `'${yearFolderId}' in parents and trashed=false and name contains '(Google Sheets)' and name contains 'BD - TRACKING - RODADA'`,
+        fields: "files(id, name, mimeType, modifiedTime)",
+        orderBy: "name",
+      })
 
-      if (response.data.files.length > 0) {
-        this.rootFolderId = response.data.files[0].id;
-        console.log('Pasta Telefônicas encontrada:', this.rootFolderId);
-        return this.rootFolderId;
-      } else {
-        throw new Error('Pasta "Telefônicas" não encontrada no Drive');
-      }
+      return response.data.files.filter((file) => file.mimeType === "application/vnd.google-apps.spreadsheet")
     } catch (error) {
-      console.error('Erro ao buscar pasta raiz:', error);
-      throw error;
+      console.error("Erro ao listar arquivos de pesquisa:", error)
+      throw error
     }
   }
 
-  // Listar estrutura completa do Drive
-  async listDriveStructure() {
+  // Listar todos os arquivos de pesquisa (com cache e processamento paralelo)
+  async listAllSurveyFiles() {
     try {
-      if (!this.rootFolderId) {
-        await this.findRootFolder();
+      if (this.cache.allSurveyFiles && this._isCacheValid()) {
+        console.log("📋 Usando cache para lista de pesquisas")
+        return this.cache.allSurveyFiles
       }
 
-      const structure = await this._getFolderStructure(this.rootFolderId, 'Telefônicas');
-      return structure;
+      console.log("🔍 Buscando todos os arquivos de pesquisa...")
+      const yearFolders = await this.listYearFolders()
+
+      const result = {
+        totalYears: yearFolders.length,
+        years: {},
+        summary: [],
+      }
+
+      // Processar pastas em paralelo (limitado)
+      const chunks = this._chunkArray(yearFolders, this.MAX_CONCURRENT_FILES)
+
+      for (const chunk of chunks) {
+        const promises = chunk.map(async (yearFolder) => {
+          const surveyFiles = await this.listSurveyFilesInYear(yearFolder.id)
+
+          return {
+            year: yearFolder.name,
+            data: {
+              folderId: yearFolder.id,
+              folderName: yearFolder.name,
+              totalFiles: surveyFiles.length,
+              files: surveyFiles.map((file) => ({
+                id: file.id,
+                name: file.name,
+                modifiedTime: file.modifiedTime,
+                rodada: this._extractRodada(file.name),
+              })),
+            },
+          }
+        })
+
+        const chunkResults = await Promise.all(promises)
+
+        chunkResults.forEach(({ year, data }) => {
+          result.years[year] = data
+          result.summary.push({
+            year: year,
+            totalFiles: data.totalFiles,
+            lastModified:
+              data.files.length > 0 ? Math.max(...data.files.map((f) => new Date(f.modifiedTime).getTime())) : null,
+          })
+        })
+      }
+
+      result.summary.sort((a, b) => b.year.localeCompare(a.year))
+
+      this.cache.allSurveyFiles = result
+      console.log(`✅ Cache atualizado com ${result.totalYears} anos`)
+
+      return result
     } catch (error) {
-      console.error('Erro ao listar estrutura:', error);
-      throw error;
+      console.error("Erro ao listar todos os arquivos de pesquisa:", error)
+      throw error
     }
   }
 
-  // Função recursiva para mapear estrutura de pastas
-  async _getFolderStructure(folderId, folderName, level = 0) {
-    const response = await this.drive.files.list({
-      q: `'${folderId}' in parents and trashed=false`,
-      fields: 'files(id, name, mimeType, modifiedTime, size)',
-      orderBy: 'name'
-    });
-
-    const structure = {
-      id: folderId,
-      name: folderName,
-      type: 'folder',
-      level: level,
-      children: []
-    };
-
-    for (const file of response.data.files) {
-      if (file.mimeType === 'application/vnd.google-apps.folder') {
-        // É uma pasta - buscar recursivamente
-        const subFolder = await this._getFolderStructure(file.id, file.name, level + 1);
-        structure.children.push(subFolder);
-      } else {
-        // É um arquivo
-        structure.children.push({
-          id: file.id,
-          name: file.name,
-          type: 'file',
-          mimeType: file.mimeType,
-          modifiedTime: file.modifiedTime,
-          size: file.size,
-          level: level + 1
-        });
-      }
+  // Dividir array em chunks para processamento paralelo
+  _chunkArray(array, chunkSize) {
+    const chunks = []
+    for (let i = 0; i < array.length; i += chunkSize) {
+      chunks.push(array.slice(i, i + chunkSize))
     }
-
-    return structure;
+    return chunks
   }
 
-  // Listar apenas arquivos de pesquisa (.xlsx/.xlsm)
-  async listSurveyFiles() {
+  // Extrair número da rodada do nome do arquivo
+  _extractRodada(fileName) {
+    const match = fileName.match(/RODADA\s+(\d+)/i)
+    return match ? Number.parseInt(match[1]) : null
+  }
+
+  // Ler dados de um arquivo Google Sheets (com cache)
+  async readGoogleSheetsFile(fileId) {
     try {
-      if (!this.rootFolderId) {
-        await this.findRootFolder();
+      // Verificar cache primeiro
+      if (this.cache.fileData.has(fileId)) {
+        console.log(`📋 Usando cache para arquivo ${fileId}`)
+        return this.cache.fileData.get(fileId)
       }
 
-      const files = await this._getAllSurveyFiles(this.rootFolderId);
-      return this._organizeSurveyFiles(files);
-    } catch (error) {
-      console.error('Erro ao listar arquivos de pesquisa:', error);
-      throw error;
-    }
-  }
+      console.log(`📖 Lendo arquivo ${fileId}...`)
 
-  async _getAllSurveyFiles(folderId, path = '') {
-    const response = await this.drive.files.list({
-      q: `'${folderId}' in parents and trashed=false`,
-      fields: 'files(id, name, mimeType, modifiedTime, parents)',
-      orderBy: 'name'
-    });
-
-    let allFiles = [];
-
-    for (const file of response.data.files) {
-      if (file.mimeType === 'application/vnd.google-apps.folder') {
-        const newPath = path ? `${path}/${file.name}` : file.name;
-        const subFiles = await this._getAllSurveyFiles(file.id, newPath);
-        allFiles = allFiles.concat(subFiles);
-      } else if (this._isSurveyFile(file.name)) {
-        allFiles.push({
-          ...file,
-          path: path,
-          category: this._categorizeFile(file.name, path)
-        });
-      }
-    }
-
-    return allFiles;
-  }
-
-  _isSurveyFile(fileName) {
-    const extensions = ['.xlsx', '.xlsm', '.xls'];
-    return extensions.some(ext => fileName.toLowerCase().endsWith(ext));
-  }
-
-  _categorizeFile(fileName, path) {
-    const lowerName = fileName.toLowerCase();
-    const lowerPath = path.toLowerCase();
-
-    if (lowerName.includes('dicionário') || lowerName.includes('dicionario') || 
-        lowerPath.includes('dicionário') || lowerPath.includes('dicionario')) {
-      return 'dictionary';
-    }
-    
-    if (lowerName.includes('bd') || lowerName.includes('tracking') || lowerName.includes('rodada')) {
-      return 'database';
-    }
-
-    return 'other';
-  }
-
-  _organizeSurveyFiles(files) {
-    const organized = {
-      databases: [],
-      dictionaries: [],
-      byYear: {},
-      total: files.length
-    };
-
-    files.forEach(file => {
-      // Extrair ano do caminho
-      const yearMatch = file.path.match(/\b(20\d{2})\b/);
-      const year = yearMatch ? yearMatch[1] : 'unknown';
-
-      if (!organized.byYear[year]) {
-        organized.byYear[year] = {
-          databases: [],
-          dictionaries: [],
-          other: []
-        };
-      }
-
-      if (file.category === 'database') {
-        organized.databases.push(file);
-        organized.byYear[year].databases.push(file);
-      } else if (file.category === 'dictionary') {
-        organized.dictionaries.push(file);
-        organized.byYear[year].dictionaries.push(file);
-      } else {
-        organized.byYear[year].other.push(file);
-      }
-    });
-
-    return organized;
-  }
-
-  // Baixar e ler arquivo Excel
-  async readExcelFile(fileId) {
-    try {
-      const response = await this.drive.files.get({
+      // Obter informações do arquivo
+      const fileInfo = await this.drive.files.get({
         fileId: fileId,
-        alt: 'media'
-      });
+        fields: "name, modifiedTime",
+      })
 
-      const workbook = XLSX.read(response.data, { type: 'buffer' });
-      
+      // Ler dados usando Google Sheets API (mais eficiente)
+      const response = await this.sheets.spreadsheets.get({
+        spreadsheetId: fileId,
+        includeGridData: true,
+        ranges: [], // Buscar todas as sheets
+      })
+
       const result = {
         fileId: fileId,
-        sheets: workbook.SheetNames,
-        data: {}
-      };
+        fileName: fileInfo.data.name,
+        modifiedTime: fileInfo.data.modifiedTime,
+        sheets: {},
+        sheetNames: [],
+      }
 
-      workbook.SheetNames.forEach(sheetName => {
-        const worksheet = workbook.Sheets[sheetName];
-        result.data[sheetName] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-      });
+      // Processar sheets em paralelo
+      const sheetPromises = response.data.sheets.map(async (sheet) => {
+        const sheetName = sheet.properties.title
+        result.sheetNames.push(sheetName)
 
-      return result;
-    } catch (error) {
-      console.error('Erro ao ler arquivo Excel:', error);
-      throw error;
-    }
-  }
+        if (sheet.data && sheet.data[0] && sheet.data[0].rowData) {
+          const rows = sheet.data[0].rowData.map((row) => {
+            if (row.values) {
+              return row.values.map((cell) => {
+                if (cell.formattedValue !== undefined) {
+                  return cell.formattedValue
+                } else if (cell.effectiveValue) {
+                  return (
+                    cell.effectiveValue.stringValue ||
+                    cell.effectiveValue.numberValue ||
+                    cell.effectiveValue.boolValue ||
+                    ""
+                  )
+                }
+                return ""
+              })
+            }
+            return []
+          })
 
-  // Converter Excel para Google Sheets
-  async convertToGoogleSheets(fileId, targetFolderId = null) {
-    try {
-      // 1. Baixar o arquivo Excel
-      const fileResponse = await this.drive.files.get({
-        fileId: fileId,
-        alt: 'media'
-      });
-
-      // 2. Obter metadados do arquivo original
-      const metadataResponse = await this.drive.files.get({
-        fileId: fileId,
-        fields: 'name, parents'
-      });
-
-      const originalName = metadataResponse.data.name;
-      const newName = originalName.replace(/\.(xlsx?|xlsm)$/i, '') + ' (Sheets)';
-
-      // 3. Criar novo Google Sheets
-      const createResponse = await this.drive.files.create({
-        requestBody: {
-          name: newName,
-          parents: targetFolderId ? [targetFolderId] : metadataResponse.data.parents,
-          mimeType: 'application/vnd.google-apps.spreadsheet'
-        },
-        media: {
-          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          body: fileResponse.data
+          result.sheets[sheetName] = rows.filter((row) => row.some((cell) => cell !== ""))
         }
-      });
+      })
 
-      console.log(`Arquivo convertido: ${originalName} -> ${newName}`);
-      return {
-        originalFileId: fileId,
-        newFileId: createResponse.data.id,
-        originalName: originalName,
-        newName: newName,
-        url: `https://docs.google.com/spreadsheets/d/${createResponse.data.id}`
-      };
+      await Promise.all(sheetPromises)
+
+      // Armazenar no cache
+      this.cache.fileData.set(fileId, result)
+
+      return result
     } catch (error) {
-      console.error('Erro ao converter para Google Sheets:', error);
-      throw error;
+      console.error("Erro ao ler arquivo Google Sheets:", error)
+      throw error
     }
   }
 
-  // Extrair dados específicos de uma pergunta em todos os arquivos
-  async extractQuestionData(questionCode, year = null) {
+  // Buscar dados históricos de uma pergunta (OTIMIZADO)
+  async getQuestionHistoricalData(questionCode) {
     try {
-      const surveyFiles = await this.listSurveyFiles();
-      const results = [];
+      const cacheKey = `question_${questionCode}`
 
-      // Filtrar por ano se especificado
-      const filesToProcess = year 
-        ? (surveyFiles.byYear[year]?.databases || [])
-        : surveyFiles.databases;
+      // Verificar cache
+      if (this.cache.questionData.has(cacheKey) && this._isCacheValid()) {
+        console.log(`📋 Usando cache para pergunta ${questionCode}`)
+        return this.cache.questionData.get(cacheKey)
+      }
 
-      for (const file of filesToProcess) {
-        try {
-          const excelData = await this.readExcelFile(file.id);
-          
-          // Procurar a pergunta em todas as sheets
-          for (const [sheetName, sheetData] of Object.entries(excelData.data)) {
-            if (sheetData.length > 0) {
-              const headers = sheetData[0];
-              const questionIndex = headers.findIndex(header => 
-                header && header.toString().toLowerCase() === questionCode.toLowerCase()
-              );
+      console.log(`🔍 Buscando dados históricos para pergunta: ${questionCode}`)
+      const startTime = Date.now()
 
-              if (questionIndex !== -1) {
-                const questionData = sheetData.slice(1).map(row => ({
-                  idEntrevista: row[0], // Assumindo que a primeira coluna é sempre o ID
-                  [questionCode]: row[questionIndex],
-                  // Incluir dados demográficos básicos se disponíveis
-                  uf: row[headers.findIndex(h => h === 'UF')] || null,
-                  regiao: row[headers.findIndex(h => h === 'REGIAO')] || null,
-                  data: row[headers.findIndex(h => h === 'DATA')] || null
-                })).filter(item => item[questionCode] != null);
+      const allFiles = await this.listAllSurveyFiles()
+      const results = {
+        questionCode: questionCode,
+        totalYears: 0,
+        totalFiles: 0,
+        totalResponses: 0,
+        years: {},
+        summary: [],
+      }
 
-                results.push({
-                  fileId: file.id,
-                  fileName: file.name,
-                  year: file.path.match(/\b(20\d{2})\b/)?.[1] || 'unknown',
-                  sheetName: sheetName,
-                  questionCode: questionCode,
-                  totalResponses: questionData.length,
-                  data: questionData
-                });
+      // Coletar todos os arquivos para processamento
+      const filesToProcess = []
+      for (const [year, yearData] of Object.entries(allFiles.years)) {
+        if (yearData.files.length === 0) continue
+
+        yearData.files.forEach((file) => {
+          filesToProcess.push({ ...file, year })
+        })
+      }
+
+      console.log(`📊 Processando ${filesToProcess.length} arquivos...`)
+
+      // Processar arquivos em chunks paralelos
+      const fileChunks = this._chunkArray(filesToProcess, this.MAX_CONCURRENT_FILES)
+
+      for (let chunkIndex = 0; chunkIndex < fileChunks.length; chunkIndex++) {
+        const chunk = fileChunks[chunkIndex]
+        console.log(`⚡ Processando chunk ${chunkIndex + 1}/${fileChunks.length} (${chunk.length} arquivos)`)
+
+        const chunkPromises = chunk.map(async (file) => {
+          try {
+            const fileData = await this.readGoogleSheetsFile(file.id)
+            const fileResults = []
+
+            // Processar sheets do arquivo
+            for (const [sheetName, sheetData] of Object.entries(fileData.sheets)) {
+              if (sheetData.length > 1) {
+                const headers = sheetData[0]
+                const questionIndex = headers.findIndex(
+                  (header) => header && header.toString().toUpperCase() === questionCode.toUpperCase(),
+                )
+
+                if (questionIndex !== -1) {
+                  const responses = sheetData
+                    .slice(1)
+                    .map((row, index) => ({
+                      responseId: index + 1,
+                      entrevistadoId: row[0] || `resp_${index + 1}`,
+                      questionValue: row[questionIndex],
+                      uf: row[headers.findIndex((h) => h && h.toString().toUpperCase() === "UF")] || null,
+                      regiao: row[headers.findIndex((h) => h && h.toString().toUpperCase() === "REGIAO")] || null,
+                      municipio: row[headers.findIndex((h) => h && h.toString().toUpperCase() === "MUNICIPIO")] || null,
+                      data: row[headers.findIndex((h) => h && h.toString().toUpperCase() === "DATA")] || null,
+                    }))
+                    .filter((item) => item.questionValue != null && item.questionValue !== "")
+
+                  if (responses.length > 0) {
+                    fileResults.push({
+                      year: file.year,
+                      fileId: file.id,
+                      fileName: file.name,
+                      sheetName: sheetName,
+                      rodada: file.rodada || 1,
+                      responses: responses,
+                    })
+                  }
+                }
               }
             }
+
+            return fileResults
+          } catch (fileError) {
+            console.error(`❌ Erro ao processar arquivo ${file.name}:`, fileError.message)
+            return []
           }
-        } catch (fileError) {
-          console.error(`Erro ao processar arquivo ${file.name}:`, fileError);
+        })
+
+        const chunkResults = await Promise.all(chunkPromises)
+
+        // Organizar resultados por ano
+        chunkResults.flat().forEach((fileResult) => {
+          if (!fileResult.year) return
+
+          if (!results.years[fileResult.year]) {
+            results.years[fileResult.year] = {
+              year: fileResult.year,
+              totalFiles: 0,
+              totalResponses: 0,
+              rodadas: {},
+            }
+            results.totalYears++
+          }
+
+          const rodada = fileResult.rodada
+          if (!results.years[fileResult.year].rodadas[rodada]) {
+            results.years[fileResult.year].rodadas[rodada] = {
+              rodada: rodada,
+              files: [],
+              totalResponses: 0,
+              responses: [],
+            }
+          }
+
+          results.years[fileResult.year].rodadas[rodada].files.push({
+            fileId: fileResult.fileId,
+            fileName: fileResult.fileName,
+            sheetName: fileResult.sheetName,
+            responsesCount: fileResult.responses.length,
+          })
+
+          results.years[fileResult.year].rodadas[rodada].responses.push(...fileResult.responses)
+          results.years[fileResult.year].rodadas[rodada].totalResponses += fileResult.responses.length
+          results.years[fileResult.year].totalResponses += fileResult.responses.length
+          results.years[fileResult.year].totalFiles++
+          results.totalFiles++
+          results.totalResponses += fileResult.responses.length
+        })
+      }
+
+      // Criar resumo
+      Object.keys(results.years).forEach((year) => {
+        if (results.years[year].totalResponses > 0) {
+          results.summary.push({
+            year: year,
+            totalFiles: results.years[year].totalFiles,
+            totalResponses: results.years[year].totalResponses,
+            rodadas: Object.keys(results.years[year].rodadas)
+              .map((r) => Number.parseInt(r))
+              .sort((a, b) => a - b),
+          })
+        }
+      })
+
+      results.summary.sort((a, b) => b.year.localeCompare(a.year))
+
+      // Armazenar no cache
+      this.cache.questionData.set(cacheKey, results)
+
+      const endTime = Date.now()
+      console.log(`✅ Pergunta ${questionCode} processada em ${(endTime - startTime) / 1000}s`)
+      console.log(`📊 Total: ${results.totalResponses} respostas de ${results.totalFiles} arquivos`)
+
+      return results
+    } catch (error) {
+      console.error("Erro ao buscar dados históricos da pergunta:", error)
+      throw error
+    }
+  }
+
+  // Buscar dados agregados (otimizado)
+  async getQuestionAggregatedData(questionCode) {
+    try {
+      console.log(`📊 Agregando dados para pergunta: ${questionCode}`)
+      const historicalData = await this.getQuestionHistoricalData(questionCode)
+
+      const aggregated = {
+        questionCode: questionCode,
+        totalResponses: historicalData.totalResponses,
+        totalYears: historicalData.totalYears,
+        totalFiles: historicalData.totalFiles,
+        responseDistribution: {},
+        byYear: {},
+        byRegion: {},
+        byUF: {},
+        timeline: [],
+      }
+
+      // Processar dados de forma mais eficiente
+      for (const [year, yearData] of Object.entries(historicalData.years)) {
+        if (yearData.totalResponses === 0) continue
+
+        aggregated.byYear[year] = {
+          totalResponses: yearData.totalResponses,
+          responseDistribution: {},
+          byRegion: {},
+          byUF: {},
+        }
+
+        for (const [rodada, rodadaData] of Object.entries(yearData.rodadas)) {
+          // Processar respostas em lote
+          const responseStats = this._processResponsesBatch(rodadaData.responses)
+
+          // Merge com dados gerais
+          this._mergeStats(aggregated.responseDistribution, responseStats.responseDistribution)
+          this._mergeStats(aggregated.byYear[year].responseDistribution, responseStats.responseDistribution)
+          this._mergeNestedStats(aggregated.byRegion, responseStats.byRegion)
+          this._mergeNestedStats(aggregated.byUF, responseStats.byUF)
+          this._mergeNestedStats(aggregated.byYear[year].byRegion, responseStats.byRegion)
+          this._mergeNestedStats(aggregated.byYear[year].byUF, responseStats.byUF)
+
+          // Timeline
+          aggregated.timeline.push({
+            year: year,
+            rodada: Number.parseInt(rodada),
+            totalResponses: rodadaData.totalResponses,
+            date: `${year}-R${rodada}`,
+            responseDistribution: { ...responseStats.responseDistribution },
+          })
         }
       }
 
-      return {
-        questionCode: questionCode,
-        year: year,
-        totalFiles: filesToProcess.length,
-        filesWithData: results.length,
-        totalResponses: results.reduce((sum, result) => sum + result.totalResponses, 0),
-        results: results
-      };
+      aggregated.timeline.sort((a, b) => {
+        if (a.year !== b.year) return a.year.localeCompare(b.year)
+        return a.rodada - b.rodada
+      })
+
+      return aggregated
     } catch (error) {
-      console.error('Erro ao extrair dados da pergunta:', error);
-      throw error;
+      console.error("Erro ao agregar dados da pergunta:", error)
+      throw error
+    }
+  }
+
+  // Processar respostas em lote (mais eficiente)
+  _processResponsesBatch(responses) {
+    const stats = {
+      responseDistribution: {},
+      byRegion: {},
+      byUF: {},
+    }
+
+    responses.forEach((response) => {
+      const value = response.questionValue
+
+      // Distribuição de respostas
+      stats.responseDistribution[value] = (stats.responseDistribution[value] || 0) + 1
+
+      // Por região
+      if (response.regiao) {
+        if (!stats.byRegion[response.regiao]) stats.byRegion[response.regiao] = {}
+        stats.byRegion[response.regiao][value] = (stats.byRegion[response.regiao][value] || 0) + 1
+      }
+
+      // Por UF
+      if (response.uf) {
+        if (!stats.byUF[response.uf]) stats.byUF[response.uf] = {}
+        stats.byUF[response.uf][value] = (stats.byUF[response.uf][value] || 0) + 1
+      }
+    })
+
+    return stats
+  }
+
+  // Merge de estatísticas simples
+  _mergeStats(target, source) {
+    for (const [key, value] of Object.entries(source)) {
+      target[key] = (target[key] || 0) + value
+    }
+  }
+
+  // Merge de estatísticas aninhadas
+  _mergeNestedStats(target, source) {
+    for (const [outerKey, innerObj] of Object.entries(source)) {
+      if (!target[outerKey]) target[outerKey] = {}
+      for (const [innerKey, value] of Object.entries(innerObj)) {
+        target[outerKey][innerKey] = (target[outerKey][innerKey] || 0) + value
+      }
     }
   }
 }
 
-module.exports = GoogleDriveService;
+module.exports = GoogleDriveService
