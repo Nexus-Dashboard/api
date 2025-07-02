@@ -4,15 +4,14 @@ const mongoose = require("mongoose")
 const connections = {}
 const models = {}
 
-// Configurações otimizadas para Vercel
+// Configurações otimizadas para Vercel (sem opções depreciadas)
 const connectionOptions = {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  maxPoolSize: 5, // Reduzido para serverless
-  serverSelectionTimeoutMS: 5000, // 5 segundos
-  socketTimeoutMS: 45000, // 45 segundos
-  bufferMaxEntries: 0, // Desabilitar buffering
-  bufferCommands: false, // Desabilitar buffering de comandos
+  maxPoolSize: 5,
+  serverSelectionTimeoutMS: 10000, // Aumentado para 10s
+  connectTimeoutMS: 10000, // Adicionado timeout de conexão
+  socketTimeoutMS: 45000,
 }
 
 // Definir schemas diretamente aqui para evitar dependência circular
