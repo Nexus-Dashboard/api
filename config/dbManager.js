@@ -1,13 +1,116 @@
 // config/dbManager.js
 const mongoose = require("mongoose")
 
-// Importar todos os schemas
-const QuestionIndexSchema = require("../models/QuestionIndex").schema
-const SurveySchema = require("../models/Survey").schema
-const ResponseSchema = require("../models/Response").schema
-
 const connections = {}
 const models = {}
+
+// Definir schemas diretamente aqui para evitar dependência circular
+const QuestionIndexSchema = new mongoose.Schema(
+  {
+    surveyNumber: String,
+    surveyName: String,
+    variable: { type: String, required: true },
+    questionText: String,
+    label: String,
+    index: String,
+    methodology: String,
+    map: String,
+    sample: String,
+    date: String,
+  },
+  { timestamps: true },
+)
+
+QuestionIndexSchema.index({ variable: 1 })
+QuestionIndexSchema.index({ surveyNumber: 1, variable: 1 }, { unique: true })
+
+const SurveySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, unique: true },
+    year: { type: Number, required: true },
+    month: { type: Number, required: true },
+    fileHashes: [{ type: String }],
+  },
+  { timestamps: true },
+)
+
+SurveySchema.index({ year: 1, month: 1 })
+
+const AnswerSchema = new mongoose.Schema(
+  {
+    k: { type: String, required: true },
+    v: { type: mongoose.Schema.Types.Mixed },
+  },
+  { _id: false },
+)
+
+const ResponseSchema = new mongoose.Schema(
+  {
+    surveyId: { type: mongoose.Schema.Types.ObjectId, ref: "Survey", required: true },
+    entrevistadoId: { type: String, required: true },
+    answers: [AnswerSchema],
+    rodada: Number,
+    year: Number,
+  },
+  {
+    timestamps: true,
+    minimize: false,
+  },
+)
+
+ResponseSchema.index({ surveyId: 1 })
+ResponseSchema.index({ "answers.k": 1 })
+
+const UserSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: [true, "Nome é obrigatório"],
+      trim: true,
+      maxlength: [100, "Nome não pode ter mais de 100 caracteres"],
+    },
+    email: {
+      type: String,
+      required: [true, "Email é obrigatório"],
+      unique: true,
+      lowercase: true,
+      trim: true,
+      match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, "Email inválido"],
+    },
+    password: {
+      type: String,
+      required: [true, "Senha é obrigatória"],
+      minlength: [6, "Senha deve ter pelo menos 6 caracteres"],
+      select: false,
+    },
+    role: {
+      type: String,
+      enum: ["admin", "user", "viewer"],
+      default: "user",
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+    lastLogin: {
+      type: Date,
+    },
+    loginAttempts: {
+      type: Number,
+      default: 0,
+    },
+    lockUntil: {
+      type: Date,
+    },
+  },
+  {
+    timestamps: true,
+  },
+)
+
+UserSchema.index({ email: 1 })
+UserSchema.index({ role: 1 })
+UserSchema.index({ isActive: 1 })
 
 const createConnection = (uri, name) => {
   if (connections[name]) {
@@ -31,6 +134,7 @@ const createConnection = (uri, name) => {
     QuestionIndex: connection.model("QuestionIndex", QuestionIndexSchema),
     Survey: connection.model("Survey", SurveySchema),
     Response: connection.model("Response", ResponseSchema),
+    User: connection.model("User", UserSchema),
   }
 
   connections[name] = connection

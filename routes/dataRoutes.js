@@ -94,14 +94,13 @@ router.get("/themes/:themeName/questions", async (req, res) => {
 })
 
 // GET /api/data/question/:questionCode/responses
-// Retorna respostas apenas de perguntas com TEXTO IDÊNTICO
+// Retorna respostas organizadas por rodada para análise histórica
 router.get("/question/:questionCode/responses", async (req, res) => {
   try {
     const { questionCode } = req.params
-    const { format } = req.query // ?format=detailed para mais detalhes
     const questionCodeUpper = questionCode.toUpperCase()
 
-    console.log(`🔍 Buscando respostas para pergunta: ${questionCodeUpper}`)
+    console.log(`🔍 Buscando respostas históricas para pergunta: ${questionCodeUpper}`)
 
     // 1. Buscar informações da pergunta no índice
     const QuestionIndex = getModel("QuestionIndex", "main")
@@ -125,191 +124,14 @@ router.get("/question/:questionCode/responses", async (req, res) => {
     const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
     console.log(`📋 Perguntas com texto idêntico: ${questionCodes.join(", ")}`)
 
-    // 3. Buscar dados em todos os bancos de dados para TODAS as perguntas com texto idêntico
+    // 3. Buscar dados históricos organizados por rodada
     const responseModels = getAllModels("Response")
-    const allResults = []
-    const detailedResults = []
+    const historicalData = []
 
     for (const Response of responseModels) {
       const dbName = Response.db.name
       console.log(`  📊 Consultando banco: ${dbName}`)
 
-      // Pipeline básico para contagem de respostas
-      const basicPipeline = [
-        {
-          $match: {
-            "answers.k": { $in: questionCodes },
-          },
-        },
-        { $unwind: "$answers" },
-        {
-          $match: {
-            "answers.k": { $in: questionCodes },
-          },
-        },
-        {
-          $group: {
-            _id: "$answers.v",
-            count: { $sum: 1 },
-          },
-        },
-      ]
-
-      const basicResults = await Response.aggregate(basicPipeline)
-      allResults.push(...basicResults)
-
-      // Se formato detalhado, buscar também por ano e rodada
-      if (format === "detailed") {
-        const detailedPipeline = [
-          {
-            $match: {
-              "answers.k": { $in: questionCodes },
-            },
-          },
-          { $unwind: "$answers" },
-          {
-            $match: {
-              "answers.k": { $in: questionCodes },
-            },
-          },
-          {
-            $group: {
-              _id: {
-                value: "$answers.v",
-                year: "$year",
-                rodada: "$rodada",
-                questionCode: "$answers.k",
-              },
-              count: { $sum: 1 },
-            },
-          },
-          {
-            $group: {
-              _id: "$_id.value",
-              totalCount: { $sum: "$count" },
-              byPeriod: {
-                $push: {
-                  year: "$_id.year",
-                  rodada: "$_id.rodada",
-                  questionCode: "$_id.questionCode",
-                  count: "$count",
-                },
-              },
-            },
-          },
-        ]
-
-        const detailed = await Response.aggregate(detailedPipeline)
-        detailedResults.push(...detailed)
-      }
-    }
-
-    // 4. Unificar os resultados básicos
-    const finalDistribution = allResults.reduce((acc, current) => {
-      const value = String(current._id || "Não informado")
-      if (acc[value]) {
-        acc[value].count += current.count
-      } else {
-        acc[value] = {
-          response: current._id,
-          count: current.count,
-        }
-      }
-      return acc
-    }, {})
-
-    const sortedDistribution = Object.values(finalDistribution).sort((a, b) => b.count - a.count)
-
-    const totalResponses = sortedDistribution.reduce((sum, item) => sum + item.count, 0)
-
-    // 5. Preparar resposta
-    const response = {
-      success: true,
-      questionCode: questionCodeUpper,
-      questionInfo,
-      identicalQuestions: identicalQuestions.map((q) => ({
-        variable: q.variable,
-        surveyNumber: q.surveyNumber,
-        surveyName: q.surveyName,
-      })),
-      totalResponses,
-      distribution: sortedDistribution,
-      summary: {
-        totalOptions: sortedDistribution.length,
-        mostCommonResponse: sortedDistribution[0]?.response || null,
-        mostCommonCount: sortedDistribution[0]?.count || 0,
-        questionsIncluded: questionCodes.length,
-      },
-    }
-
-    // 6. Adicionar detalhes se solicitado
-    if (format === "detailed") {
-      const detailedDistribution = detailedResults.reduce((acc, current) => {
-        const value = String(current._id || "Não informado")
-        if (acc[value]) {
-          acc[value].totalCount += current.totalCount
-          acc[value].byPeriod.push(...current.byPeriod)
-        } else {
-          acc[value] = {
-            response: current._id,
-            totalCount: current.totalCount,
-            byPeriod: current.byPeriod,
-          }
-        }
-        return acc
-      }, {})
-
-      response.detailedDistribution = Object.values(detailedDistribution).sort((a, b) => b.totalCount - a.totalCount)
-    }
-
-    console.log(
-      `✅ Pergunta ${questionCodeUpper}: ${totalResponses} respostas de ${questionCodes.length} perguntas com texto idêntico`,
-    )
-
-    res.json(response)
-  } catch (error) {
-    console.error(`❌ Erro ao buscar respostas para pergunta ${req.params.questionCode}:`, error)
-    res.status(500).json({
-      success: false,
-      message: "Erro interno do servidor",
-      error: error.message,
-    })
-  }
-})
-
-// GET /api/data/question/:questionCode/timeline
-// Timeline considerando apenas perguntas com texto idêntico
-router.get("/question/:questionCode/timeline", async (req, res) => {
-  try {
-    const { questionCode } = req.params
-    const questionCodeUpper = questionCode.toUpperCase()
-
-    console.log(`📈 Gerando timeline para pergunta: ${questionCodeUpper}`)
-
-    // 1. Buscar perguntas com texto idêntico
-    const QuestionIndex = getModel("QuestionIndex", "main")
-    const questionInfo = await QuestionIndex.findOne({
-      variable: questionCodeUpper,
-    }).lean()
-
-    if (!questionInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Pergunta '${questionCode}' não encontrada no índice.`,
-      })
-    }
-
-    const identicalQuestions = await QuestionIndex.find({
-      questionText: questionInfo.questionText,
-    }).lean()
-
-    const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
-
-    // 2. Buscar timeline em todos os bancos
-    const responseModels = getAllModels("Response")
-    const timelineData = []
-
-    for (const Response of responseModels) {
       const pipeline = [
         {
           $match: {
@@ -341,7 +163,7 @@ router.get("/question/:questionCode/timeline", async (req, res) => {
             totalResponses: { $sum: "$count" },
             distribution: {
               $push: {
-                value: "$_id.value",
+                response: "$_id.value",
                 count: "$count",
               },
             },
@@ -356,32 +178,180 @@ router.get("/question/:questionCode/timeline", async (req, res) => {
       ]
 
       const results = await Response.aggregate(pipeline)
-      timelineData.push(...results)
+      historicalData.push(...results)
     }
 
-    // 3. Ordenar timeline final
-    const sortedTimeline = timelineData.sort((a, b) => {
-      if (a._id.year !== b._id.year) {
-        return a._id.year - b._id.year
-      }
-      return a._id.rodada - b._id.rodada
+    // 4. Organizar dados por rodada e calcular percentuais
+    const rodadas = historicalData
+      .sort((a, b) => {
+        if (a._id.year !== b._id.year) {
+          return a._id.year - b._id.year
+        }
+        return a._id.rodada - b._id.rodada
+      })
+      .map((rodada) => {
+        // Ordenar distribuição por contagem (maior para menor)
+        const sortedDistribution = rodada.distribution.sort((a, b) => b.count - a.count)
+
+        // Calcular percentuais
+        const distributionWithPercentage = sortedDistribution.map((item) => ({
+          response: item.response,
+          count: item.count,
+          percentage: ((item.count / rodada.totalResponses) * 100).toFixed(1),
+        }))
+
+        return {
+          year: rodada._id.year,
+          rodada: rodada._id.rodada,
+          period: `${rodada._id.year}-R${rodada._id.rodada}`,
+          totalResponses: rodada.totalResponses,
+          distribution: distributionWithPercentage,
+        }
+      })
+
+    // 5. Calcular resumo geral (agregado de todas as rodadas)
+    const allResponses = {}
+    let totalGeral = 0
+
+    rodadas.forEach((rodada) => {
+      rodada.distribution.forEach((item) => {
+        const response = String(item.response || "Não informado")
+        allResponses[response] = (allResponses[response] || 0) + item.count
+        totalGeral += item.count
+      })
     })
+
+    const resumoGeral = Object.entries(allResponses)
+      .map(([response, count]) => ({
+        response: response,
+        count: count,
+        percentage: ((count / totalGeral) * 100).toFixed(1),
+      }))
+      .sort((a, b) => b.count - a.count)
+
+    // 6. Preparar resposta final
+    const response = {
+      success: true,
+      questionCode: questionCodeUpper,
+      questionInfo,
+      identicalQuestions: identicalQuestions.map((q) => ({
+        variable: q.variable,
+        surveyNumber: q.surveyNumber,
+        surveyName: q.surveyName,
+      })),
+      summary: {
+        totalRodadas: rodadas.length,
+        totalResponses: totalGeral,
+        questionsIncluded: questionCodes.length,
+        periodRange: rodadas.length > 0 ? `${rodadas[0].period} até ${rodadas[rodadas.length - 1].period}` : null,
+      },
+      resumoGeral,
+      historicalData: rodadas,
+    }
+
+    console.log(
+      `✅ Pergunta ${questionCodeUpper}: ${totalGeral} respostas em ${rodadas.length} rodadas de ${questionCodes.length} perguntas com texto idêntico`,
+    )
+
+    res.json(response)
+  } catch (error) {
+    console.error(`❌ Erro ao buscar respostas para pergunta ${req.params.questionCode}:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// GET /api/data/question/:questionCode/comparison
+// Compara a evolução de uma resposta específica ao longo das rodadas
+router.get("/question/:questionCode/comparison", async (req, res) => {
+  try {
+    const { questionCode } = req.params
+    const { response: targetResponse } = req.query // ?response=Lula
+    const questionCodeUpper = questionCode.toUpperCase()
+
+    if (!targetResponse) {
+      return res.status(400).json({
+        success: false,
+        message: "Parâmetro 'response' é obrigatório. Ex: ?response=Lula",
+      })
+    }
+
+    console.log(`📈 Comparando evolução da resposta '${targetResponse}' para pergunta: ${questionCodeUpper}`)
+
+    // Reutilizar a lógica da rota anterior para obter dados históricos
+    const QuestionIndex = getModel("QuestionIndex", "main")
+    const questionInfo = await QuestionIndex.findOne({ variable: questionCodeUpper }).lean()
+
+    if (!questionInfo) {
+      return res.status(404).json({
+        success: false,
+        message: `Pergunta '${questionCode}' não encontrada no índice.`,
+      })
+    }
+
+    const identicalQuestions = await QuestionIndex.find({
+      questionText: questionInfo.questionText,
+    }).lean()
+
+    const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
+
+    // Buscar dados específicos para a resposta alvo
+    const responseModels = getAllModels("Response")
+    const evolutionData = []
+
+    for (const Response of responseModels) {
+      const pipeline = [
+        { $match: { "answers.k": { $in: questionCodes } } },
+        { $unwind: "$answers" },
+        { $match: { "answers.k": { $in: questionCodes } } },
+        {
+          $group: {
+            _id: {
+              year: "$year",
+              rodada: "$rodada",
+              value: "$answers.v",
+            },
+            count: { $sum: 1 },
+          },
+        },
+        {
+          $group: {
+            _id: { year: "$_id.year", rodada: "$_id.rodada" },
+            totalResponses: { $sum: "$count" },
+            targetCount: {
+              $sum: {
+                $cond: [{ $eq: ["$_id.value", targetResponse] }, "$count", 0],
+              },
+            },
+          },
+        },
+        { $sort: { "_id.year": 1, "_id.rodada": 1 } },
+      ]
+
+      const results = await Response.aggregate(pipeline)
+      evolutionData.push(...results)
+    }
+
+    const evolution = evolutionData.map((item) => ({
+      year: item._id.year,
+      rodada: item._id.rodada,
+      period: `${item._id.year}-R${item._id.rodada}`,
+      totalResponses: item.totalResponses,
+      targetCount: item.targetCount,
+      percentage: item.totalResponses > 0 ? ((item.targetCount / item.totalResponses) * 100).toFixed(1) : "0.0",
+    }))
 
     res.json({
       success: true,
       questionCode: questionCodeUpper,
-      questionInfo,
-      questionsIncluded: questionCodes,
-      timeline: sortedTimeline.map((item) => ({
-        year: item._id.year,
-        rodada: item._id.rodada,
-        period: `${item._id.year}-R${item._id.rodada}`,
-        totalResponses: item.totalResponses,
-        distribution: item.distribution.sort((a, b) => b.count - a.count),
-      })),
+      targetResponse,
+      evolution,
     })
   } catch (error) {
-    console.error(`❌ Erro ao gerar timeline para pergunta ${req.params.questionCode}:`, error)
+    console.error(`❌ Erro na comparação:`, error)
     res.status(500).json({
       success: false,
       message: "Erro interno do servidor",
