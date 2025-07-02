@@ -1,18 +1,28 @@
-// models/Response.js
-const mongoose = require('mongoose');
-const { Schema } = mongoose;
+const mongoose = require("mongoose")
 
-// cada resposta vira um par key/value
-const AnswerSchema = new Schema({
-  key:   { type: String, required: true },
-  value: { type: Schema.Types.Mixed }
-}, { _id: false });
+const AnswerSchema = new mongoose.Schema(
+  {
+    k: { type: String, required: true }, // key -> k (economiza espaço)
+    v: { type: mongoose.Schema.Types.Mixed }, // value -> v (economiza espaço)
+  },
+  { _id: false },
+)
 
-const ResponseSchema = new Schema({
-  surveyId:       { type: Schema.Types.ObjectId, ref: 'Survey', required: true, index: true },
-  entrevistadoId: { type: String,                 required: true, index: true },
-  answers:        { type: [AnswerSchema],         required: true },
-  createdAt:      { type: Date, default: Date.now, index: true }
-});
+const ResponseSchema = new mongoose.Schema(
+  {
+    surveyId: { type: mongoose.Schema.Types.ObjectId, ref: "Survey", required: true },
+    entrevistadoId: { type: String, required: true },
+    answers: [AnswerSchema],
+    rodada: Number,
+    year: Number,
+  },
+  {
+    timestamps: true, // Usa createdAt e updatedAt automáticos
+    minimize: false, // Não remove campos vazios automaticamente
+  },
+)
 
-module.exports = mongoose.model('Response', ResponseSchema);
+ResponseSchema.index({ surveyId: 1 })
+ResponseSchema.index({ "answers.k": 1 }) // Atualizado para o novo nome do campo
+
+module.exports = mongoose.model("Response", ResponseSchema)

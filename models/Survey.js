@@ -1,20 +1,15 @@
-// models/Survey.js
-const mongoose = require('mongoose');
-const { Schema } = mongoose;
+const mongoose = require("mongoose")
 
-const VariableSchema = new Schema({
-  key:   { type: String, required: true },
-  label: { type: String, required: true },
-  type:  { type: String, enum: ['single','multi','scale','text'], default: 'text' }
-}, { _id: false });
+const SurveySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, unique: true },
+    year: { type: Number, required: true },
+    month: { type: Number, required: true }, // rodada
+    fileHashes: [{ type: String }], // To track processed files
+  },
+  { timestamps: true },
+)
 
-const SurveySchema = new Schema({
-  name:      { type: String, required: true, unique: true },
-  month:     String,
-  year:      Number,
-  variables: [VariableSchema],
-  fileHashes: { type: [String], default: [], index: true },
-  createdAt: { type: Date, default: Date.now }
-});
+SurveySchema.index({ year: 1, month: 1 })
 
-module.exports = mongoose.model('Survey', SurveySchema);
+module.exports = mongoose.model("Survey", SurveySchema)

@@ -1,46 +1,32 @@
 require("dotenv").config()
 const express = require("express")
 const cors = require("cors")
-const connectDB = require("./config/db")
+
+// Não chame connectDB() aqui, o dbManager já cuida disso.
+// const connectDB = require("./config/db");
+require("./config/dbManager") // Apenas carrega e inicializa as conexões
+
 const dataRoutes = require("./routes/dataRoutes")
-const googleRoutes = require("./routes/googleRoutes")  // NOVA LINHA
+const migrationRoutes = require("./routes/migrationRoutes")
+const maintenanceRoutes = require("./routes/maintenanceRoutes")
 
 const app = express()
 
 // Middlewares
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-)
-
+app.use(cors())
 app.use(express.json({ limit: "50mb" }))
-app.use(express.urlencoded({ extended: true, limit: "50mb" }))
 
-// Rota básica para verificar status da API
-app.get("/", async (req, res) => {
-  try {
-    // Testa a conexão com o banco
-    await connectDB()
-    res.json({ success: true, message: "API está ativa e conectada ao banco" })
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Erro ao conectar com o banco", error: error.message })
-  }
+// Rotas
+app.use("/api/data", dataRoutes)
+app.use("/api/migration", migrationRoutes)
+app.use("/api/maintenance", maintenanceRoutes)
+
+app.get("/", (req, res) => {
+  res.send("API is running with multiple DB connections...")
 })
 
-// Rotas da API
-app.use("/api", dataRoutes)
-app.use("/api/google", googleRoutes)  // NOVA LINHA
+const PORT = process.env.PORT || 5000
 
-// Para desenvolvimento local
-if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 4000
-  app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`)
-  })
-}
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
 
-// Para Vercel, exportamos o app
 module.exports = app
