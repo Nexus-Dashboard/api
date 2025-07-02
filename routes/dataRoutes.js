@@ -9,7 +9,7 @@ router.get("/themes", async (req, res) => {
   try {
     console.log("🎯 Buscando temas disponíveis...")
 
-    const QuestionIndex = getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex", "main")
 
     const themes = await QuestionIndex.aggregate([
       {
@@ -59,7 +59,7 @@ router.get("/themes/:themeName/questions", async (req, res) => {
     const { themeName } = req.params
     console.log(`🎯 Buscando perguntas do tema: ${themeName}`)
 
-    const QuestionIndex = getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex", "main")
 
     const questions = await QuestionIndex.find({
       index: themeName,
@@ -103,7 +103,7 @@ router.get("/question/:questionCode/responses", async (req, res) => {
     console.log(`🔍 Buscando respostas históricas para pergunta: ${questionCodeUpper}`)
 
     // 1. Buscar informações da pergunta no índice
-    const QuestionIndex = getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex", "main")
     const questionInfo = await QuestionIndex.findOne({
       variable: questionCodeUpper,
     }).lean()
@@ -124,61 +124,69 @@ router.get("/question/:questionCode/responses", async (req, res) => {
     const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
     console.log(`📋 Perguntas com texto idêntico: ${questionCodes.join(", ")}`)
 
-    // 3. Buscar dados históricos organizados por rodada
-    const responseModels = getAllModels("Response")
+    // 3. Buscar dados históricos organizados por rodada com timeout otimizado
+    const responseModels = await getAllModels("Response")
     const historicalData = []
 
     for (const Response of responseModels) {
       const dbName = Response.db.name
       console.log(`  📊 Consultando banco: ${dbName}`)
 
-      const pipeline = [
-        {
-          $match: {
-            "answers.k": { $in: questionCodes },
-          },
-        },
-        { $unwind: "$answers" },
-        {
-          $match: {
-            "answers.k": { $in: questionCodes },
-          },
-        },
-        {
-          $group: {
-            _id: {
-              year: "$year",
-              rodada: "$rodada",
-              value: "$answers.v",
+      try {
+        const pipeline = [
+          {
+            $match: {
+              "answers.k": { $in: questionCodes },
             },
-            count: { $sum: 1 },
           },
-        },
-        {
-          $group: {
-            _id: {
-              year: "$_id.year",
-              rodada: "$_id.rodada",
+          { $unwind: "$answers" },
+          {
+            $match: {
+              "answers.k": { $in: questionCodes },
             },
-            totalResponses: { $sum: "$count" },
-            distribution: {
-              $push: {
-                response: "$_id.value",
-                count: "$count",
+          },
+          {
+            $group: {
+              _id: {
+                year: "$year",
+                rodada: "$rodada",
+                value: "$answers.v",
+              },
+              count: { $sum: 1 },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                year: "$_id.year",
+                rodada: "$_id.rodada",
+              },
+              totalResponses: { $sum: "$count" },
+              distribution: {
+                $push: {
+                  response: "$_id.value",
+                  count: "$count",
+                },
               },
             },
           },
-        },
-        {
-          $sort: {
-            "_id.year": 1,
-            "_id.rodada": 1,
+          {
+            $sort: {
+              "_id.year": 1,
+              "_id.rodada": 1,
+            },
           },
-        },
-      ]
+        ]
 
-      const results = await Response.aggregate(pipeline)
-      historicalData.push(...results)
+        // Executar agregação com timeout reduzido
+        const results = await Response.aggregate(pipeline).maxTimeMS(30000) // 30 segundos
+        historicalData.push(...results)
+
+        console.log(`  ✅ Banco ${dbName}: ${results.length} rodadas encontradas`)
+      } catch (dbError) {
+        console.error(`  ❌ Erro no banco ${dbName}:`, dbError.message)
+        // Continuar com outros bancos mesmo se um falhar
+      }
     }
 
     // 4. Organizar dados por rodada e calcular percentuais
@@ -225,7 +233,7 @@ router.get("/question/:questionCode/responses", async (req, res) => {
       .map(([response, count]) => ({
         response: response,
         count: count,
-        percentage: ((count / totalGeral) * 100).toFixed(1),
+        percentage: totalGeral > 0 ? ((count / totalGeral) * 100).toFixed(1) : "0.0",
       }))
       .sort((a, b) => b.count - a.count)
 
@@ -282,7 +290,7 @@ router.get("/question/:questionCode/comparison", async (req, res) => {
     console.log(`📈 Comparando evolução da resposta '${targetResponse}' para pergunta: ${questionCodeUpper}`)
 
     // Reutilizar a lógica da rota anterior para obter dados históricos
-    const QuestionIndex = getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex", "main")
     const questionInfo = await QuestionIndex.findOne({ variable: questionCodeUpper }).lean()
 
     if (!questionInfo) {
@@ -299,40 +307,44 @@ router.get("/question/:questionCode/comparison", async (req, res) => {
     const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
 
     // Buscar dados específicos para a resposta alvo
-    const responseModels = getAllModels("Response")
+    const responseModels = await getAllModels("Response")
     const evolutionData = []
 
     for (const Response of responseModels) {
-      const pipeline = [
-        { $match: { "answers.k": { $in: questionCodes } } },
-        { $unwind: "$answers" },
-        { $match: { "answers.k": { $in: questionCodes } } },
-        {
-          $group: {
-            _id: {
-              year: "$year",
-              rodada: "$rodada",
-              value: "$answers.v",
+      try {
+        const pipeline = [
+          { $match: { "answers.k": { $in: questionCodes } } },
+          { $unwind: "$answers" },
+          { $match: { "answers.k": { $in: questionCodes } } },
+          {
+            $group: {
+              _id: {
+                year: "$year",
+                rodada: "$rodada",
+                value: "$answers.v",
+              },
+              count: { $sum: 1 },
             },
-            count: { $sum: 1 },
           },
-        },
-        {
-          $group: {
-            _id: { year: "$_id.year", rodada: "$_id.rodada" },
-            totalResponses: { $sum: "$count" },
-            targetCount: {
-              $sum: {
-                $cond: [{ $eq: ["$_id.value", targetResponse] }, "$count", 0],
+          {
+            $group: {
+              _id: { year: "$_id.year", rodada: "$_id.rodada" },
+              totalResponses: { $sum: "$count" },
+              targetCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$_id.value", targetResponse] }, "$count", 0],
+                },
               },
             },
           },
-        },
-        { $sort: { "_id.year": 1, "_id.rodada": 1 } },
-      ]
+          { $sort: { "_id.year": 1, "_id.rodada": 1 } },
+        ]
 
-      const results = await Response.aggregate(pipeline)
-      evolutionData.push(...results)
+        const results = await Response.aggregate(pipeline).maxTimeMS(30000)
+        evolutionData.push(...results)
+      } catch (dbError) {
+        console.error(`Erro na comparação no banco ${Response.db.name}:`, dbError.message)
+      }
     }
 
     const evolution = evolutionData.map((item) => ({
@@ -373,7 +385,7 @@ router.get("/search/questions", async (req, res) => {
   }
 
   try {
-    const QuestionIndex = getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex", "main")
 
     const searchResults = await QuestionIndex.find({
       $or: [
