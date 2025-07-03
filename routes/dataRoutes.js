@@ -179,7 +179,7 @@ router.get("/question/:questionCode/responses", async (req, res) => {
         ]
 
         // Executar agregação com timeout reduzido
-        const results = await Response.aggregate(pipeline).maxTimeMS(30000) // 30 segundos
+        const results = await Response.aggregate(pipeline, { maxTimeMS: 30000 }) // 30 segundos
         historicalData.push(...results)
 
         console.log(`  ✅ Banco ${dbName}: ${results.length} rodadas encontradas`)
@@ -340,7 +340,7 @@ router.get("/question/:questionCode/comparison", async (req, res) => {
           { $sort: { "_id.year": 1, "_id.rodada": 1 } },
         ]
 
-        const results = await Response.aggregate(pipeline).maxTimeMS(30000)
+        const results = await Response.aggregate(pipeline, { maxTimeMS: 30000 })
         evolutionData.push(...results)
       } catch (dbError) {
         console.error(`Erro na comparação no banco ${Response.db.name}:`, dbError.message)
