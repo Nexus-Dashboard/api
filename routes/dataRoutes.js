@@ -3,6 +3,18 @@ const express = require("express")
 const router = express.Router()
 const { getModel, getAllModels } = require("../config/dbManager")
 
+// Função para criar slug normalizado
+function createSlug(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Remove acentos
+    .replace(/[^a-z0-9\s-]/g, "") // Remove caracteres especiais
+    .replace(/\s+/g, "-") // Substitui espaços por hífens
+    .replace(/-+/g, "-") // Remove hífens duplicados
+    .trim("-") // Remove hífens do início/fim
+}
+
 // GET /api/data/themes
 // Retorna todos os temas disponíveis (valores únicos da coluna 'Index')
 router.get("/themes", async (req, res) => {
@@ -35,12 +47,19 @@ router.get("/themes", async (req, res) => {
       },
     ])
 
-    console.log(`✅ Encontrados ${themes.length} temas`)
+    // Adicionar slug após a agregação
+    const themesWithSlug = themes.map((theme) => ({
+      ...theme,
+      slug: createSlug(theme.theme),
+      id: createSlug(theme.theme), // Para compatibilidade
+    }))
+
+    console.log(`✅ Encontrados ${themesWithSlug.length} temas`)
 
     res.json({
       success: true,
-      count: themes.length,
-      themes: themes,
+      count: themesWithSlug.length,
+      themes: themesWithSlug,
     })
   } catch (error) {
     console.error("❌ Erro ao buscar temas:", error)
@@ -52,14 +71,39 @@ router.get("/themes", async (req, res) => {
   }
 })
 
-// GET /api/data/themes/:themeName/questions
-// Retorna todas as perguntas de um tema específico
-router.get("/themes/:themeName/questions", async (req, res) => {
+// GET /api/data/themes/:themeSlug/questions
+router.get("/themes/:themeSlug/questions", async (req, res) => {
   try {
-    const { themeName } = req.params
-    console.log(`🎯 Buscando perguntas do tema: ${themeName}`)
+    const { themeSlug } = req.params
+    console.log(`🎯 Buscando perguntas do tema com slug: ${themeSlug}`)
 
     const QuestionIndex = await getModel("QuestionIndex", "main")
+
+    // Primeiro, encontrar o tema real pelo slug
+    const allThemes = await QuestionIndex.aggregate([
+      {
+        $match: {
+          index: { $exists: true, $ne: null, $ne: "" },
+        },
+      },
+      {
+        $group: {
+          _id: "$index",
+        },
+      },
+    ])
+
+    // Encontrar o tema que corresponde ao slug
+    const targetTheme = allThemes.find((theme) => createSlug(theme._id) === themeSlug)
+
+    if (!targetTheme) {
+      return res.status(404).json({
+        success: false,
+        message: `Tema com slug '${themeSlug}' não encontrado`,
+      })
+    }
+
+    const themeName = targetTheme._id
 
     const questions = await QuestionIndex.find({
       index: themeName,
@@ -68,23 +112,17 @@ router.get("/themes/:themeName/questions", async (req, res) => {
       .sort({ variable: 1 })
       .lean()
 
-    if (questions.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: `Nenhuma pergunta encontrada para o tema '${themeName}'`,
-      })
-    }
-
     console.log(`✅ Encontradas ${questions.length} perguntas para o tema '${themeName}'`)
 
     res.json({
       success: true,
       theme: themeName,
+      slug: themeSlug,
       count: questions.length,
       questions: questions,
     })
   } catch (error) {
-    console.error(`❌ Erro ao buscar perguntas do tema ${req.params.themeName}:`, error)
+    console.error(`❌ Erro ao buscar perguntas do tema ${req.params.themeSlug}:`, error)
     res.status(500).json({
       success: false,
       message: "Erro interno do servidor",
