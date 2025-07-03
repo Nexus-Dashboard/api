@@ -121,4 +121,6 @@ UserSchema.methods.toPublicJSON = function () {
   }
 }
 
+// Exportar o schema e o modelo compilado para uso local (scripts)
 module.exports = mongoose.model("User", UserSchema)
+module.exports.schema = UserSchema
