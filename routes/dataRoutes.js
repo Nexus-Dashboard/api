@@ -115,6 +115,111 @@ async function getDemographicDataForRounds(rounds, responseModels) {
   return demographicDataByRound
 }
 
+// NOVA FUNÇÃO: Busca o breakdown demográfico para uma resposta específica em dadas rodadas
+async function getDemographicBreakdownForAnswer(questionCodes, targetResponse, rounds, responseModels) {
+  const demographicFields = [
+    "UF",
+    "Regiao",
+    "PF1",
+    "PF2#1",
+    "PF2_faixas",
+    "PF3",
+    "PF4",
+    "PF5",
+    "PF6",
+    "PF7",
+    "PF8",
+    "PF9",
+  ]
+  const finalBreakdown = {}
+
+  // Pipeline para encontrar entrevistados que deram a resposta alvo
+  // e depois agregar seus dados demográficos
+  const pipeline = [
+    // 1. Filtrar pelas rodadas de interesse
+    {
+      $match: {
+        $or: rounds.map((r) => ({ year: r.year, rodada: r.rodada })),
+      },
+    },
+    // 2. Adicionar um campo que verifica se o entrevistado deu a resposta alvo
+    {
+      $addFields: {
+        isTargetResponse: {
+          $gt: [
+            {
+              $size: {
+                $filter: {
+                  input: "$answers",
+                  as: "ans",
+                  cond: {
+                    $and: [{ $in: ["$$ans.k", questionCodes] }, { $eq: ["$$ans.v", targetResponse] }],
+                  },
+                },
+              },
+            },
+            0,
+          ],
+        },
+      },
+    },
+    // 3. Manter apenas os que deram a resposta alvo
+    { $match: { isTargetResponse: true } },
+    // 4. Projetar os campos demográficos para o nível superior para facilitar a agregação
+    {
+      $project: {
+        ...demographicFields.reduce((acc, field) => {
+          acc[field] = {
+            $let: {
+              vars: { ans: { $filter: { input: "$answers", cond: { $eq: ["$$this.k", field] } } } },
+              in: { $arrayElemAt: ["$$ans.v", 0] },
+            },
+          }
+          return acc
+        }, {}),
+      },
+    },
+    // 5. Usar $facet para agregar todos os campos demográficos de uma vez
+    {
+      $facet: demographicFields.reduce((acc, field) => {
+        acc[field] = [
+          { $match: { [field]: { $exists: true, $ne: null, $ne: "" } } },
+          { $group: { _id: `$${field}`, count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+          { $project: { _id: 0, response: "$_id", count: "$count" } },
+        ]
+        return acc
+      }, {}),
+    },
+  ]
+
+  for (const Response of responseModels) {
+    const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 90000 })
+    if (results.length > 0) {
+      const facetResult = results[0]
+      for (const [field, data] of Object.entries(facetResult)) {
+        if (!finalBreakdown[field]) finalBreakdown[field] = []
+        // Consolidar resultados de diferentes bancos
+        data.forEach((item) => {
+          const existing = finalBreakdown[field].find((i) => i.response === item.response)
+          if (existing) {
+            existing.count += item.count
+          } else {
+            finalBreakdown[field].push(item)
+          }
+        })
+      }
+    }
+  }
+
+  // Ordenar a consolidação final
+  for (const field in finalBreakdown) {
+    finalBreakdown[field].sort((a, b) => b.count - a.count)
+  }
+
+  return finalBreakdown
+}
+
 // GET /api/data/themes
 router.get("/themes", async (req, res) => {
   try {
@@ -234,9 +339,10 @@ router.get("/themes/:themeSlug/questions", async (req, res) => {
 router.get("/question/:questionCode/responses", async (req, res) => {
   try {
     const { questionCode } = req.params
+    const { page = 1, limit = 10 } = req.query // Parâmetros de paginação
     const questionCodeUpper = questionCode.toUpperCase()
 
-    console.log(`🔍 Buscando respostas históricas para pergunta: ${questionCodeUpper}`)
+    console.log(`🔍 Buscando respostas para ${questionCodeUpper}, página: ${page}, limite: ${limit}`)
 
     const QuestionIndex = await getModel("QuestionIndex", "main")
     const questionInfo = await QuestionIndex.findOne({
@@ -259,123 +365,105 @@ router.get("/question/:questionCode/responses", async (req, res) => {
     console.log(`📋 Perguntas com texto idêntico: ${questionCodes.join(", ")}`)
 
     const responseModels = await getAllModels("Response")
-    let historicalData = []
+    const allRounds = []
 
+    // 1. Obter a lista de TODAS as rodadas disponíveis primeiro
     for (const Response of responseModels) {
-      const dbName = Response.db.name
-      console.log(`  📊 Consultando banco: ${dbName} para pergunta principal`)
-
-      try {
-        const pipeline = [
-          { $match: { "answers.k": { $in: questionCodes } } },
-          { $unwind: "$answers" },
-          { $match: { "answers.k": { $in: questionCodes } } },
-          {
-            $group: {
-              _id: { year: "$year", rodada: "$rodada", value: "$answers.v" },
-              count: { $sum: 1 },
-            },
+      const pipeline = [
+        { $match: { "answers.k": { $in: questionCodes } } },
+        {
+          $group: {
+            _id: { year: "$year", rodada: "$rodada" },
           },
-          {
-            $group: {
-              _id: { year: "$_id.year", rodada: "$_id.rodada" },
-              totalResponses: { $sum: "$count" },
-              distribution: { $push: { response: "$_id.value", count: "$count" } },
-            },
-          },
-          { $sort: { "_id.year": 1, "_id.rodada": 1 } },
-        ]
-        const results = await Response.aggregate(pipeline, { maxTimeMS: 60000 })
-        historicalData.push(...results)
-      } catch (dbError) {
-        console.error(`  ❌ Erro no banco ${dbName}:`, dbError.message)
-      }
+        },
+        { $sort: { "_id.year": -1, "_id.rodada": -1 } }, // Mais recentes primeiro
+      ]
+      const results = await Response.aggregate(pipeline, { maxTimeMS: 60000 })
+      allRounds.push(...results.map((r) => r._id))
     }
 
-    // Consolidar dados de diferentes bancos, se houver
-    const consolidatedData = historicalData.reduce((acc, round) => {
-      const key = `${round._id.year}-R${round._id.rodada}`
-      if (!acc[key]) {
-        acc[key] = { ...round._id, totalResponses: 0, distribution: [] }
+    // Consolidar e ordenar todas as rodadas
+    const uniqueRounds = Array.from(new Map(allRounds.map((r) => [`${r.year}-${r.rodada}`, r])).values()).sort(
+      (a, b) => b.year - a.year || b.rodada - a.rodada,
+    )
+
+    // 2. Paginar a lista de rodadas
+    const totalRounds = uniqueRounds.length
+    const totalPages = Math.ceil(totalRounds / limit)
+    const startIndex = (page - 1) * limit
+    const endIndex = page * limit
+    const paginatedRounds = uniqueRounds.slice(startIndex, endIndex)
+
+    if (paginatedRounds.length === 0 && totalRounds > 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Página ${page} não encontrada. Apenas ${totalPages} páginas disponíveis.`,
+      })
+    }
+
+    console.log(`📋 Processando ${paginatedRounds.length} rodadas para a página ${page}...`)
+
+    // 3. Processar apenas as rodadas da página atual
+    const processedData = []
+    for (const round of paginatedRounds) {
+      const roundDistribution = []
+      let totalResponsesInRound = 0
+
+      // Obter distribuição da pergunta principal para esta rodada
+      for (const Response of responseModels) {
+        const distPipeline = [
+          { $match: { year: round.year, rodada: round.rodada, "answers.k": { $in: questionCodes } } },
+          { $unwind: "$answers" },
+          { $match: { "answers.k": { $in: questionCodes } } },
+          { $group: { _id: "$answers.v", count: { $sum: 1 } } },
+        ]
+        const distResults = await Response.aggregate(distPipeline)
+        distResults.forEach((item) => {
+          const existing = roundDistribution.find((i) => i.response === item._id)
+          if (existing) {
+            existing.count += item.count
+          } else {
+            roundDistribution.push({ response: item._id, count: item.count })
+          }
+          totalResponsesInRound += item.count
+        })
       }
-      acc[key].totalResponses += round.totalResponses
-      acc[key].distribution.push(...round.distribution)
-      return acc
-    }, {})
-    historicalData = Object.values(consolidatedData)
 
-    // Buscar dados demográficos para as rodadas encontradas
-    const roundsToFetch = historicalData.map((r) => ({ year: r.year, rodada: r.rodada }))
-    console.log(`📋 Buscando dados demográficos para ${roundsToFetch.length} rodadas...`)
-    const demographicData =
-      roundsToFetch.length > 0 ? await getDemographicDataForRounds(roundsToFetch, responseModels) : {}
-    console.log(`✅ Dados demográficos encontrados para ${Object.keys(demographicData).length} rodadas.`)
+      // Para cada resposta na distribuição, buscar o breakdown demográfico
+      for (const item of roundDistribution) {
+        console.log(`  -> Detalhando '${item.response}' para ${round.year}-R${round.rodada}`)
+        item.demographics = await getDemographicBreakdownForAnswer(
+          questionCodes,
+          item.response,
+          [round], // Apenas para a rodada atual
+          responseModels,
+        )
+      }
 
-    const rodadas = historicalData
-      .sort((a, b) => {
-        if (a.year !== b.year) return a.year - b.year
-        return a.rodada - b.rodada
+      processedData.push({
+        year: round.year,
+        rodada: round.rodada,
+        period: `${round.year}-R${round.rodada}`,
+        totalResponses: totalResponsesInRound,
+        distribution: roundDistribution.sort((a, b) => b.count - a.count),
       })
-      .map((rodada) => {
-        const roundKey = `${rodada.year}-R${rodada.rodada}`
-        const sortedDistribution = rodada.distribution.sort((a, b) => b.count - a.count)
-        const distributionWithPercentage = sortedDistribution.map((item) => ({
-          response: item.response,
-          count: item.count,
-          percentage: ((item.count / rodada.totalResponses) * 100).toFixed(1),
-        }))
-
-        return {
-          year: rodada.year,
-          rodada: rodada.rodada,
-          period: roundKey,
-          totalResponses: rodada.totalResponses,
-          distribution: distributionWithPercentage,
-          demographics: demographicData[roundKey] || {}, // Adiciona os dados demográficos
-        }
-      })
-
-    const allResponses = {}
-    let totalGeral = 0
-    rodadas.forEach((rodada) => {
-      rodada.distribution.forEach((item) => {
-        const response = String(item.response || "Não informado")
-        allResponses[response] = (allResponses[response] || 0) + item.count
-        totalGeral += item.count
-      })
-    })
-
-    const resumoGeral = Object.entries(allResponses)
-      .map(([response, count]) => ({
-        response: response,
-        count: count,
-        percentage: totalGeral > 0 ? ((count / totalGeral) * 100).toFixed(1) : "0.0",
-      }))
-      .sort((a, b) => b.count - a.count)
+    }
 
     const response = {
       success: true,
       questionCode: questionCodeUpper,
       questionInfo,
-      identicalQuestions: identicalQuestions.map((q) => ({
-        variable: q.variable,
-        surveyNumber: q.surveyNumber,
-        surveyName: q.surveyName,
-      })),
-      summary: {
-        totalRodadas: rodadas.length,
-        totalResponses: totalGeral,
-        questionsIncluded: questionCodes.length,
-        periodRange: rodadas.length > 0 ? `${rodadas[0].period} até ${rodadas[rodadas.length - 1].period}` : null,
+      pagination: {
+        currentPage: Number.parseInt(page),
+        limit: Number.parseInt(limit),
+        totalPages: totalPages,
+        totalRounds: totalRounds,
+        hasNextPage: endIndex < totalRounds,
       },
-      resumoGeral,
-      historicalData: rodadas,
+      historicalData: processedData,
     }
 
-    console.log(
-      `✅ Pergunta ${questionCodeUpper}: ${totalGeral} respostas em ${rodadas.length} rodadas de ${questionCodes.length} perguntas com texto idêntico`,
-    )
-
+    console.log(`✅ Resposta da página ${page} para ${questionCodeUpper} enviada.`)
     res.json(response)
   } catch (error) {
     console.error(`❌ Erro ao buscar respostas para pergunta ${req.params.questionCode}:`, error)
