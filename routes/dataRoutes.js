@@ -12,212 +12,7 @@ function createSlug(text) {
     .replace(/[\u0300-\u036f]/g, "") // Remove acentos
     .replace(/[^a-z0-9\s-]/g, "") // Remove caracteres especiais
     .replace(/\s+/g, "-") // Substitui espaços por hífens
-    .replace(/-+/g, "-") // Remove hífens duplicados
-    .trim("-") // Remove hífens do início/fim
-}
-
-// Função auxiliar para buscar dados demográficos
-async function getDemographicDataForRounds(rounds, responseModels) {
-  const demographicFields = [
-    "UF",
-    "Regiao",
-    "PF1",
-    "PF2#1",
-    "PF2_faixas",
-    "PF3",
-    "PF4",
-    "PF5",
-    "PF6",
-    "PF7",
-    "PF8",
-    "PF9",
-  ]
-  const demographicDataByRound = {}
-
-  const pipeline = [
-    // 1. Filtrar apenas pelas rodadas que nos interessam
-    {
-      $match: {
-        $or: rounds.map((r) => ({ year: r.year, rodada: r.rodada })),
-      },
-    },
-    // 2. Projetar os campos demográficos e o peso para o nível superior
-    {
-      $project: {
-        year: 1,
-        rodada: 1,
-        // Extrai cada campo demográfico do array 'answers'
-        ...demographicFields.reduce((acc, field) => {
-          acc[field] = {
-            $let: {
-              vars: { ans: { $filter: { input: "$answers", cond: { $eq: ["$$this.k", field] } } } },
-              in: { $arrayElemAt: ["$$ans.v", 0] },
-            },
-          }
-          return acc
-        }, {}),
-        // Extrai o campo de peso usando regex
-        weight: {
-          $let: {
-            vars: {
-              ans: {
-                $filter: {
-                  input: "$answers",
-                  cond: { $regexMatch: { input: "$$this.k", regex: /weights/i } },
-                },
-              },
-            },
-            in: { $arrayElemAt: ["$$ans.v", 0] },
-          },
-        },
-      },
-    },
-    // 3. Usar $facet para calcular todas as distribuições de uma vez
-    {
-      $facet: demographicFields.reduce((acc, field) => {
-        acc[field] = [
-          { $match: { [field]: { $exists: true, $ne: null, $ne: "" } } },
-          { $group: { _id: { year: "$year", rodada: "$rodada", value: `$${field}` }, count: { $sum: 1 } } },
-          {
-            $group: {
-              _id: { year: "$_id.year", rodada: "$_id.rodada" },
-              distribution: { $push: { response: "$_id.value", count: "$count" } },
-            },
-          },
-        ]
-        return acc
-      }, {}),
-    },
-  ]
-
-  for (const Response of responseModels) {
-    const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 60000 })
-    const facetResult = results[0]
-
-    for (const [field, fieldData] of Object.entries(facetResult)) {
-      for (const roundData of fieldData) {
-        const roundKey = `${roundData._id.year}-R${roundData._id.rodada}`
-        if (!demographicDataByRound[roundKey]) {
-          demographicDataByRound[roundKey] = {}
-        }
-        // Calcular total e percentuais para a distribuição deste campo
-        const total = roundData.distribution.reduce((sum, item) => sum + item.count, 0)
-        demographicDataByRound[roundKey][field] = roundData.distribution
-          .map((item) => ({
-            ...item,
-            percentage: ((item.count / total) * 100).toFixed(1),
-          }))
-          .sort((a, b) => b.count - a.count)
-      }
-    }
-  }
-
-  return demographicDataByRound
-}
-
-// NOVA FUNÇÃO: Busca o breakdown demográfico para uma resposta específica em dadas rodadas
-async function getDemographicBreakdownForAnswer(questionCodes, targetResponse, rounds, responseModels) {
-  const demographicFields = [
-    "UF",
-    "Regiao",
-    "PF1",
-    "PF2#1",
-    "PF2_faixas",
-    "PF3",
-    "PF4",
-    "PF5",
-    "PF6",
-    "PF7",
-    "PF8",
-    "PF9",
-  ]
-  const finalBreakdown = {}
-
-  // Pipeline para encontrar entrevistados que deram a resposta alvo
-  // e depois agregar seus dados demográficos
-  const pipeline = [
-    // 1. Filtrar pelas rodadas de interesse
-    {
-      $match: {
-        $or: rounds.map((r) => ({ year: r.year, rodada: r.rodada })),
-      },
-    },
-    // 2. Adicionar um campo que verifica se o entrevistado deu a resposta alvo
-    {
-      $addFields: {
-        isTargetResponse: {
-          $gt: [
-            {
-              $size: {
-                $filter: {
-                  input: "$answers",
-                  as: "ans",
-                  cond: {
-                    $and: [{ $in: ["$$ans.k", questionCodes] }, { $eq: ["$$ans.v", targetResponse] }],
-                  },
-                },
-              },
-            },
-            0,
-          ],
-        },
-      },
-    },
-    // 3. Manter apenas os que deram a resposta alvo
-    { $match: { isTargetResponse: true } },
-    // 4. Projetar os campos demográficos para o nível superior para facilitar a agregação
-    {
-      $project: {
-        ...demographicFields.reduce((acc, field) => {
-          acc[field] = {
-            $let: {
-              vars: { ans: { $filter: { input: "$answers", cond: { $eq: ["$$this.k", field] } } } },
-              in: { $arrayElemAt: ["$$ans.v", 0] },
-            },
-          }
-          return acc
-        }, {}),
-      },
-    },
-    // 5. Usar $facet para agregar todos os campos demográficos de uma vez
-    {
-      $facet: demographicFields.reduce((acc, field) => {
-        acc[field] = [
-          { $match: { [field]: { $exists: true, $ne: null, $ne: "" } } },
-          { $group: { _id: `$${field}`, count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $project: { _id: 0, response: "$_id", count: "$count" } },
-        ]
-        return acc
-      }, {}),
-    },
-  ]
-
-  for (const Response of responseModels) {
-    const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 90000 })
-    if (results.length > 0) {
-      const facetResult = results[0]
-      for (const [field, data] of Object.entries(facetResult)) {
-        if (!finalBreakdown[field]) finalBreakdown[field] = []
-        // Consolidar resultados de diferentes bancos
-        data.forEach((item) => {
-          const existing = finalBreakdown[field].find((i) => i.response === item.response)
-          if (existing) {
-            existing.count += item.count
-          } else {
-            finalBreakdown[field].push(item)
-          }
-        })
-      }
-    }
-  }
-
-  // Ordenar a consolidação final
-  for (const field in finalBreakdown) {
-    finalBreakdown[field].sort((a, b) => b.count - a.count)
-  }
-
-  return finalBreakdown
+    .replace(/-+/g, "-") // Remove hífens do início/fim
 }
 
 // GET /api/data/themes
@@ -335,14 +130,13 @@ router.get("/themes/:themeSlug/questions", async (req, res) => {
   }
 })
 
-// GET /api/data/question/:questionCode/responses
+// GET /api/data/question/:questionCode/responses - VERSÃO OTIMIZADA COM TODOS OS CAMPOS DEMOGRÁFICOS
 router.get("/question/:questionCode/responses", async (req, res) => {
   try {
     const { questionCode } = req.params
-    const { page = 1, limit = 10 } = req.query // Parâmetros de paginação
     const questionCodeUpper = questionCode.toUpperCase()
 
-    console.log(`🔍 Buscando respostas para ${questionCodeUpper}, página: ${page}, limite: ${limit}`)
+    console.log(`⚡️ Executando busca OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper}`)
 
     const QuestionIndex = await getModel("QuestionIndex", "main")
     const questionInfo = await QuestionIndex.findOne({
@@ -365,108 +159,183 @@ router.get("/question/:questionCode/responses", async (req, res) => {
     console.log(`📋 Perguntas com texto idêntico: ${questionCodes.join(", ")}`)
 
     const responseModels = await getAllModels("Response")
-    const allRounds = []
+    const rawData = []
 
-    // 1. Obter a lista de TODAS as rodadas disponíveis primeiro
+    // TODOS os campos demográficos: originais + UF + REGIAO
+    const demographicFields = [
+      "UF",
+      "Regiao",
+      "PF1",
+      "PF2#1",
+      "PF2_faixas",
+      "PF3",
+      "PF4",
+      "PF5",
+      "PF6",
+      "PF7",
+      "PF8",
+      "PF9",
+    ]
+
+    // 1. Fetch all raw data in one go from all DBs
     for (const Response of responseModels) {
+      console.log(`🔍 Processando banco: ${Response.db.name}`)
+
       const pipeline = [
         { $match: { "answers.k": { $in: questionCodes } } },
         {
-          $group: {
-            _id: { year: "$year", rodada: "$rodada" },
+          $project: {
+            _id: 0,
+            year: 1,
+            rodada: 1,
+            mainAnswer: {
+              $let: {
+                vars: {
+                  ans: {
+                    $filter: {
+                      input: "$answers",
+                      cond: { $in: ["$$this.k", questionCodes] },
+                    },
+                  },
+                },
+                in: { $arrayElemAt: ["$$ans.v", 0] },
+              },
+            },
+            weight: {
+              $let: {
+                vars: {
+                  weightAns: {
+                    $filter: {
+                      input: "$answers",
+                      cond: { $regexMatch: { input: "$$this.k", regex: /weights/i } },
+                    },
+                  },
+                },
+                in: {
+                  $ifNull: [
+                    {
+                      $toDouble: {
+                        $replaceAll: {
+                          input: { $toString: { $arrayElemAt: ["$$weightAns.v", 0] } },
+                          find: ",",
+                          replacement: ".",
+                        },
+                      },
+                    },
+                    1.0,
+                  ],
+                },
+              },
+            },
+            demographics: {
+              $arrayToObject: {
+                $map: {
+                  input: {
+                    $filter: {
+                      input: "$answers",
+                      cond: { $in: ["$$this.k", demographicFields] },
+                    },
+                  },
+                  as: "item",
+                  in: { k: "$$item.k", v: "$$item.v" },
+                },
+              },
+            },
           },
         },
-        { $sort: { "_id.year": -1, "_id.rodada": -1 } }, // Mais recentes primeiro
+        { $match: { mainAnswer: { $exists: true, $ne: null, $ne: "" } } },
       ]
-      const results = await Response.aggregate(pipeline, { maxTimeMS: 60000 })
-      allRounds.push(...results.map((r) => r._id))
+
+      const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 120000 })
+      rawData.push(...results)
     }
 
-    // Consolidar e ordenar todas as rodadas
-    const uniqueRounds = Array.from(new Map(allRounds.map((r) => [`${r.year}-${r.rodada}`, r])).values()).sort(
-      (a, b) => b.year - a.year || b.rodada - a.rodada,
-    )
+    console.log(`📊 Total de registros brutos coletados: ${rawData.length}`)
 
-    // 2. Paginar a lista de rodadas
-    const totalRounds = uniqueRounds.length
-    const totalPages = Math.ceil(totalRounds / limit)
-    const startIndex = (page - 1) * limit
-    const endIndex = page * limit
-    const paginatedRounds = uniqueRounds.slice(startIndex, endIndex)
+    // 2. Process raw data in memory
+    const processedData = new Map()
 
-    if (paginatedRounds.length === 0 && totalRounds > 0) {
-      return res.status(404).json({
-        success: false,
-        message: `Página ${page} não encontrada. Apenas ${totalPages} páginas disponíveis.`,
-      })
-    }
-
-    console.log(`📋 Processando ${paginatedRounds.length} rodadas para a página ${page}...`)
-
-    // 3. Processar apenas as rodadas da página atual
-    const processedData = []
-    for (const round of paginatedRounds) {
-      const roundDistribution = []
-      let totalResponsesInRound = 0
-
-      // Obter distribuição da pergunta principal para esta rodada
-      for (const Response of responseModels) {
-        const distPipeline = [
-          { $match: { year: round.year, rodada: round.rodada, "answers.k": { $in: questionCodes } } },
-          { $unwind: "$answers" },
-          { $match: { "answers.k": { $in: questionCodes } } },
-          { $group: { _id: "$answers.v", count: { $sum: 1 } } },
-        ]
-        const distResults = await Response.aggregate(distPipeline)
-        distResults.forEach((item) => {
-          const existing = roundDistribution.find((i) => i.response === item._id)
-          if (existing) {
-            existing.count += item.count
-          } else {
-            roundDistribution.push({ response: item._id, count: item.count })
-          }
-          totalResponsesInRound += item.count
+    for (const doc of rawData) {
+      const roundKey = `${doc.year}-R${doc.rodada}`
+      if (!processedData.has(roundKey)) {
+        processedData.set(roundKey, {
+          year: doc.year,
+          rodada: doc.rodada,
+          period: roundKey,
+          totalResponses: 0,
+          totalWeightedResponses: 0,
+          distribution: new Map(),
         })
       }
+      const roundData = processedData.get(roundKey)
+      roundData.totalResponses += 1
+      roundData.totalWeightedResponses += doc.weight
 
-      // Para cada resposta na distribuição, buscar o breakdown demográfico
-      for (const item of roundDistribution) {
-        console.log(`  -> Detalhando '${item.response}' para ${round.year}-R${round.rodada}`)
-        item.demographics = await getDemographicBreakdownForAnswer(
-          questionCodes,
-          item.response,
-          [round], // Apenas para a rodada atual
-          responseModels,
-        )
+      if (!roundData.distribution.has(doc.mainAnswer)) {
+        roundData.distribution.set(doc.mainAnswer, {
+          response: doc.mainAnswer,
+          count: 0,
+          weightedCount: 0,
+          demographics: {},
+        })
       }
+      const answerData = roundData.distribution.get(doc.mainAnswer)
+      answerData.count += 1
+      answerData.weightedCount += doc.weight
 
-      processedData.push({
-        year: round.year,
-        rodada: round.rodada,
-        period: `${round.year}-R${round.rodada}`,
-        totalResponses: totalResponsesInRound,
-        distribution: roundDistribution.sort((a, b) => b.count - a.count),
-      })
+      // Processar TODOS os campos demográficos
+      for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
+        if (demoValue && demoValue !== "") {
+          if (!answerData.demographics[demoField]) {
+            answerData.demographics[demoField] = new Map()
+          }
+          const demoFieldMap = answerData.demographics[demoField]
+          if (!demoFieldMap.has(demoValue)) {
+            demoFieldMap.set(demoValue, { response: demoValue, count: 0, weightedCount: 0 })
+          }
+          const demoValueData = demoFieldMap.get(demoValue)
+          demoValueData.count += 1
+          demoValueData.weightedCount += doc.weight
+        }
+      }
     }
+
+    // 3. Finalize structure (convert maps to sorted arrays)
+    const finalHistoricalData = Array.from(processedData.values())
+      .map((round) => {
+        round.distribution = Array.from(round.distribution.values())
+          .map((answer) => {
+            answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
+
+            // Processar todos os campos demográficos
+            Object.keys(answer.demographics).forEach((demoField) => {
+              answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
+                .map((d) => ({
+                  ...d,
+                  weightedCount: Math.round(d.weightedCount * 100) / 100,
+                }))
+                .sort((a, b) => b.weightedCount - a.weightedCount)
+            })
+            return answer
+          })
+          .sort((a, b) => b.weightedCount - a.weightedCount)
+        round.totalWeightedResponses = Math.round(round.totalWeightedResponses * 100) / 100
+        return round
+      })
+      .sort((a, b) => b.year - a.year || b.rodada - a.rodada)
 
     const response = {
       success: true,
       questionCode: questionCodeUpper,
       questionInfo,
-      pagination: {
-        currentPage: Number.parseInt(page),
-        limit: Number.parseInt(limit),
-        totalPages: totalPages,
-        totalRounds: totalRounds,
-        hasNextPage: endIndex < totalRounds,
-      },
-      historicalData: processedData,
+      historicalData: finalHistoricalData,
+      demographicFields: demographicFields, // Lista dos campos incluídos
     }
 
-    console.log(`✅ Resposta da página ${page} para ${questionCodeUpper} enviada.`)
+    console.log(`✅ Resposta OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper} enviada.`)
     res.json(response)
   } catch (error) {
-    console.error(`❌ Erro ao buscar respostas para pergunta ${req.params.questionCode}:`, error)
+    console.error(`❌ Erro na busca OTIMIZADA para ${req.params.questionCode}:`, error)
     res.status(500).json({
       success: false,
       message: "Erro interno do servidor",
