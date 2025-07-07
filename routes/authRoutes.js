@@ -59,7 +59,7 @@ router.post("/register", async (req, res) => {
 
     await user.save()
 
-    console.log(`✅ Novo usuário criado: ${email} (${role}) por ${req.user.email}`)
+    console.log(`✅ Novo usuário criado: ${email} (${role})`)
 
     res.status(201).json({
       success: true,
