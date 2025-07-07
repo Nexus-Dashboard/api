@@ -26,8 +26,7 @@ const generateToken = (userId) => {
 }
 
 // POST /api/auth/register
-// Registrar novo usuário (apenas admins podem criar usuários)
-router.post("/register", authenticate, authorize("admin"), async (req, res) => {
+router.post("/register", async (req, res) => {
   try {
     const { name, email, password, role = "user" } = req.body
 
