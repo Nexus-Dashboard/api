@@ -33,9 +33,9 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // POST /api/migration/sync-index
 // Sincroniza o índice de perguntas para o banco de dados PRINCIPAL
-router.post("/sync-index", ensureServiceInitialized, async (req, res) => {
+router.get("/sync-index", ensureServiceInitialized, async (req, res) => {
   try {
-    const QuestionIndex = await getModel("QuestionIndex", "main") // Sempre no principal
+    const QuestionIndex = await getModel("QuestionIndex") // Sempre no principal
     const indexFileId = "1FurphB54po2Pu-ganTcYqHTMZ7leHuWl_g9hodmhAco"
     console.log(`Iniciando sincronização do índice de perguntas para o banco principal...`)
 
@@ -119,7 +119,7 @@ router.get("/sync-index-answers", ensureServiceInitialized, async (req, res) => 
     console.log(`Total de ${Object.keys(dictionariesByRodada).length} dicionários processados.`)
 
     // 2. Get the model and fetch all questions
-    const QuestionIndex = await getModel("QuestionIndex", "main") // Always update the main index
+    const QuestionIndex = await getModel("QuestionIndex") // Always update the main index
     console.log("Buscando todas as perguntas do índice principal...")
     const allQuestions = await QuestionIndex.find({}).lean()
     console.log(`Encontradas ${allQuestions.length} perguntas para atualizar.`)
@@ -180,7 +180,7 @@ router.post("/update-variables", ensureServiceInitialized, async (req, res) => {
   try {
     console.log("Iniciando atualização de variáveis no índice...")
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
     const indexFileId = "1FurphB54po2Pu-ganTcYqHTMZ7leHuWl_g9hodmhAco"
 
     console.log("Lendo arquivo de índice atualizado...")
@@ -264,7 +264,7 @@ router.post("/update-variables", ensureServiceInitialized, async (req, res) => {
 
 // POST /api/migration/sync-surveys
 // Migra dados do Google Drive, distribuindo entre os bancos de dados por ano
-router.post("/sync-surveys", ensureServiceInitialized, async (req, res) => {
+router.get("/sync-surveys", ensureServiceInitialized, async (req, res) => {
   try {
     console.log("Iniciando migração de dados de pesquisas com distribuição por ano...")
 
@@ -281,13 +281,11 @@ router.post("/sync-surveys", ensureServiceInitialized, async (req, res) => {
       }
 
       const yearData = allFilesByYear.years[year]
-      console.log(
-        `Processando ano: ${year} (${yearData.files.length} arquivos) -> Banco: ${year === "2025" ? "2025" : "main"}`,
-      )
+      console.log(`Processando ano: ${year} (${yearData.files.length} arquivos)`)
 
       // Seleciona os modelos corretos para o ano
-      const Survey = await getModel("Survey", year)
-      const Response = await getModel("Response", year)
+      const Survey = await getModel("Survey")
+      const Response = await getModel("Response")
 
       for (const file of yearData.files) {
         const fileHash = `${file.id}-${file.modifiedTime}`

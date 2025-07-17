@@ -2,7 +2,6 @@
 const express = require("express")
 const router = express.Router()
 const mongoose = require("mongoose")
-const connectDB = require("../config/db")
 const { getAllModels } = require("../config/dbManager")
 
 // DELETE /api/maintenance/cleanup-old-responses

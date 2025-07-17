@@ -20,7 +20,7 @@ router.get("/themes", async (req, res) => {
   try {
     console.log("🎯 Buscando temas disponíveis...")
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
 
     const themes = await QuestionIndex.aggregate([
       {
@@ -80,7 +80,7 @@ router.get("/questions/all", async (req, res) => {
 
     console.log("🎯 Buscando todas as perguntas do índice...")
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
 
     // Construir filtros
     const filters = {}
@@ -138,7 +138,7 @@ router.get("/themes/:themeSlug/questions", async (req, res) => {
     const { themeSlug } = req.params
     console.log(`🎯 Buscando perguntas do tema com slug: ${themeSlug}`)
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
 
     // Primeiro, encontrar o tema real pelo slug
     const allThemes = await QuestionIndex.aggregate([
@@ -200,7 +200,7 @@ router.get("/question/:questionCode/responses", async (req, res) => {
 
     console.log(`⚡️ Executando busca OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper}`)
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
     const questionInfo = await QuestionIndex.findOne({
       variable: questionCodeUpper,
     }).lean()
@@ -422,7 +422,7 @@ router.get("/question/:questionCode/comparison", async (req, res) => {
 
     console.log(`📈 Comparando evolução da resposta '${targetResponse}' para pergunta: ${questionCodeUpper}`)
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
     const questionInfo = await QuestionIndex.findOne({ variable: questionCodeUpper }).lean()
 
     if (!questionInfo) {
@@ -511,7 +511,7 @@ router.get("/search/questions", async (req, res) => {
   }
 
   try {
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
 
     const searchResults = await QuestionIndex.find({
       $or: [
@@ -554,7 +554,7 @@ router.post("/themes/questions", async (req, res) => {
 
     console.log(`🎯 Buscando perguntas do tema: ${theme}`)
 
-    const QuestionIndex = await getModel("QuestionIndex", "main")
+    const QuestionIndex = await getModel("QuestionIndex")
 
     const questions = await QuestionIndex.find({
       index: theme,

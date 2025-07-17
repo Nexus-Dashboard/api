@@ -14,7 +14,7 @@ router.get("/", authorize("admin"), async (req, res) => {
     const { page = 1, limit = 10, search, role, isActive } = req.query
 
     // CORREÇÃO: Usar await getModel como no authRoutes.js que funciona
-    const User = await getModel("User", "main")
+    const User = await getModel("User")
 
     // Construir filtros
     const filters = {}
@@ -75,7 +75,7 @@ router.get("/:id", async (req, res) => {
     }
 
     // CORREÇÃO: Usar await getModel
-    const User = await getModel("User", "main")
+    const User = await getModel("User")
     const user = await User.findById(id).select("-password")
 
     if (!user) {
@@ -106,7 +106,7 @@ router.put("/:id", authorize("admin"), async (req, res) => {
     const { name, email, role, isActive } = req.body
 
     // CORREÇÃO: Usar await getModel
-    const User = await getModel("User", "main")
+    const User = await getModel("User")
 
     // Verificar se o usuário existe
     const user = await User.findById(id)
@@ -182,7 +182,7 @@ router.delete("/:id", authorize("admin"), async (req, res) => {
     }
 
     // CORREÇÃO: Usar await getModel
-    const User = await getModel("User", "main")
+    const User = await getModel("User")
     const user = await User.findById(id)
     if (!user) {
       return res.status(404).json({
@@ -223,7 +223,7 @@ router.post("/:id/reset-password", authorize("admin"), async (req, res) => {
     }
 
     // CORREÇÃO: Usar await getModel
-    const User = await getModel("User", "main")
+    const User = await getModel("User")
     const user = await User.findById(id)
     if (!user) {
       return res.status(404).json({
@@ -256,7 +256,7 @@ router.post("/:id/reset-password", authorize("admin"), async (req, res) => {
 router.get("/stats/overview", authorize("admin"), async (req, res) => {
   try {
     // CORREÇÃO: Usar await getModel
-    const User = await getModel("User", "main")
+    const User = await getModel("User")
 
     const [totalUsers, activeUsers, usersByRole, recentUsers] = await Promise.all([
       User.countDocuments(),

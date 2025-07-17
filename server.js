@@ -2,8 +2,8 @@ require("dotenv").config()
 const express = require("express")
 const cors = require("cors")
 
-// Carregar dbManager para inicializar conexões
-require("./config/dbManager")
+// Carregar dbManager e a função de conexão
+const { connectToDatabase } = require("./config/dbManager")
 
 // Importar rotas
 const dataRoutes = require("./routes/dataRoutes")
@@ -12,6 +12,7 @@ const maintenanceRoutes = require("./routes/maintenanceRoutes")
 const authRoutes = require("./routes/authRoutes")
 const userRoutes = require("./routes/userRoutes")
 const googleRoutes = require("./routes/googleRoutes")
+
 
 const app = express()
 
@@ -31,8 +32,9 @@ if (process.env.NODE_ENV !== "production") {
 app.get("/", (req, res) => {
   res.json({
     message: "API Nexus - Sistema de Análise de Pesquisas",
-    version: "1.0.0",
+    version: "1.1.0",
     status: "online",
+    database: "single-cluster",
     endpoints: {
       auth: "/api/auth",
       users: "/api/users",
@@ -59,6 +61,7 @@ app.use("/api/migration", migrationRoutes)
 app.use("/api/maintenance", maintenanceRoutes)
 app.use("/api/google", googleRoutes)
 
+
 // Middleware de tratamento de erros 404
 app.use("*", (req, res) => {
   console.log(`❌ Rota não encontrada: ${req.method} ${req.originalUrl}`)
@@ -66,12 +69,6 @@ app.use("*", (req, res) => {
     success: false,
     message: "Endpoint não encontrado",
     path: req.originalUrl,
-    availableEndpoints: [
-      "GET /",
-      "POST /api/auth/login",
-      "GET /api/data/themes",
-      "GET /api/data/question/:code/responses",
-    ],
   })
 })
 
@@ -92,6 +89,12 @@ app.listen(PORT, () => {
   console.log(`📊 API Nexus - Sistema de Análise de Pesquisas`)
   console.log(`🔐 Autenticação JWT habilitada`)
   console.log(`🌐 Acesse: http://localhost:${PORT}`)
+
+  // "Aquece" a conexão com o banco de dados na inicialização
+  connectToDatabase().catch((err) => {
+    console.error("Falha ao conectar ao banco de dados na inicialização:", err)
+  })
 })
 
 module.exports = app
+

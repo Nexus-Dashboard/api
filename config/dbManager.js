@@ -1,109 +1,87 @@
 // config/dbManager.js
 const mongoose = require("mongoose")
 
-// Cache para as conexões e modelos
-const cachedConnections = {}
+// Importar schemas para garantir que sejam carregados
+const QuestionIndexSchema = require("../models/QuestionIndex").schema
+const SurveySchema = require("../models/Survey").schema
+const ResponseSchema = require("../models/Response").schema
+const UserSchema = require("../models/User").schema
 
-// Configurações de conexão otimizadas
+// Usar um cache global para persistir a conexão entre invocações de função serverless
+let cached = global.mongoose
+
+if (!cached) {
+  cached = global.mongoose = { conn: null, promise: null, models: {} }
+}
+
 const connectionOptions = {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  maxPoolSize: 5,
-  serverSelectionTimeoutMS: 30000, // Aumentado para 30 segundos
+  maxPoolSize: 10,
+  serverSelectionTimeoutMS: 5000,
   socketTimeoutMS: 45000,
-  connectTimeoutMS: 30000,
+  connectTimeoutMS: 10000,
+  bufferCommands: false, // Importante para performance em serverless
 }
 
-// Função principal para conectar e gerenciar conexões
-async function connectToDatabase(name, uri) {
-  // Se já temos uma conexão em cache, reutilizamos
-  if (cachedConnections[name]) {
-    // Se a conexão está ativa, retorna
-    if (cachedConnections[name].conn.readyState === 1) {
-      console.log(`♻️  Reutilizando conexão em cache para: ${name}`)
-      return cachedConnections[name]
-    }
-    // Se a conexão caiu, removemos do cache para recriar
-    console.log(`🔌 Conexão ${name} perdida. Removendo do cache.`)
-    delete cachedConnections[name]
+async function connectToDatabase() {
+  if (cached.conn) {
+    console.log("♻️  Reutilizando conexão MongoDB existente.")
+    return cached
   }
 
-  console.log(`🔌 Criando NOVA conexão com o banco de dados: ${name}`)
+  if (!cached.promise) {
+    if (!process.env.MONGODB_URI) {
+      throw new Error("A variável de ambiente MONGODB_URI não está definida.")
+    }
+    console.log("🔌 Criando NOVA conexão com o MongoDB...")
+    cached.promise = mongoose.connect(process.env.MONGODB_URI, connectionOptions).then((mongooseInstance) => {
+      console.log("✅ MongoDB conectado com sucesso!")
 
-  // Criar a promessa de conexão e armazenar no cache
-  // Isso evita que múltiplas chamadas simultâneas criem múltiplas conexões
-  const connectionPromise = mongoose
-    .createConnection(uri, connectionOptions)
-    .asPromise()
-    .then((conn) => {
-      console.log(`✅ MongoDB ${name} conectado com sucesso!`)
+      // Registrar modelos na instância principal do mongoose para evitar recompilação
+      mongoose.model("QuestionIndex", QuestionIndexSchema)
+      mongoose.model("Survey", SurveySchema)
+      mongoose.model("Response", ResponseSchema)
+      mongoose.model("User", UserSchema)
 
-      // Registrar os modelos na conexão
-      const models = {
-        QuestionIndex: conn.model("QuestionIndex", require("../models/QuestionIndex").schema),
-        Survey: conn.model("Survey", require("../models/Survey").schema),
-        Response: conn.model("Response", require("../models/Response").schema),
-        User: conn.model("User", require("../models/User").schema),
-      }
-
-      return { conn, models }
+      return mongooseInstance
     })
-
-  cachedConnections[name] = { promise: connectionPromise }
+  }
 
   try {
-    // Aguardar a promessa ser resolvida e armazenar o resultado final
-    cachedConnections[name] = await connectionPromise
-    return cachedConnections[name]
-  } catch (error) {
-    // Se a conexão falhar, remover a promessa do cache para permitir nova tentativa
-    delete cachedConnections[name]
-    console.error(`❌ Erro fatal ao conectar com ${name}:`, error.message)
-    throw error
+    cached.conn = await cached.promise
+    // Mapear modelos para o cache para fácil acesso
+    cached.models = {
+      QuestionIndex: mongoose.models.QuestionIndex,
+      Survey: mongoose.models.Survey,
+      Response: mongoose.models.Response,
+      User: mongoose.models.User,
+    }
+    return cached
+  } catch (e) {
+    cached.promise = null // Resetar a promessa em caso de falha
+    console.error("❌ Erro fatal ao conectar com MongoDB:", e.message)
+    throw e
   }
 }
 
-// Função para obter um modelo específico de um banco de dados
-const getModel = async (modelName, year) => {
-  const yearStr = String(year)
-  const dbName = yearStr === "2025" && process.env.MONGODB_URI_2025 ? "2025" : "main"
-  const uri = dbName === "2025" ? process.env.MONGODB_URI_2025 : process.env.MONGODB_URI
-
-  if (!uri) {
-    throw new Error(`URI do banco ${dbName} não configurada`)
-  }
-
-  const { models } = await connectToDatabase(dbName, uri)
-
+// Função simplificada para obter um modelo
+const getModel = async (modelName) => {
+  const { models } = await connectToDatabase()
   if (!models[modelName]) {
-    throw new Error(`Modelo ${modelName} não encontrado no banco ${dbName}`)
+    throw new Error(`Modelo ${modelName} não encontrado.`)
   }
-
   return models[modelName]
 }
 
-// Função para obter todos os modelos de um tipo
+// Mantida para compatibilidade, agora retorna apenas uma instância do modelo
 const getAllModels = async (modelName) => {
-  const modelInstances = []
-
-  // Conectar ao banco principal
-  const mainModel = await getModel(modelName, "main")
-  modelInstances.push(mainModel)
-
-  // Conectar ao banco 2025 se configurado
-  if (process.env.MONGODB_URI_2025) {
-    try {
-      const model2025 = await getModel(modelName, "2025")
-      modelInstances.push(model2025)
-    } catch (error) {
-      console.warn("⚠️  Não foi possível conectar ao banco 2025, continuando com o principal.")
-    }
-  }
-
-  return modelInstances
+  const model = await getModel(modelName)
+  return [model]
 }
 
 module.exports = {
   getModel,
   getAllModels,
+  connectToDatabase, // Exportar para "aquecer" a conexão na inicialização
 }
