@@ -93,6 +93,48 @@ class GoogleDriveService {
     return match ? Number.parseInt(match[1]) : null
   }
 
+  _extractRodadaFromDictName(fileName) {
+    const match = fileName.match(/Rodada\s+(\d+)/i)
+    return match ? Number.parseInt(match[1], 10) : null
+  }
+
+  async listAllDictionaryFiles() {
+    try {
+      const dictionaryFolders = {
+        2023: "1TQcSsIm1ZzCco2YcdgHoNYhBize2DyfZ",
+        2024: "1C7fXBwEi_MW8Zz9MyegeWmm6mm4cpnNX",
+        2025: "1-WZoIvaRPFXyvdNkjTg92OTz0PGmF-uD",
+      }
+      const allDictionaries = {} // { rodadaNumber: fileId, ... }
+
+      console.log("Listando arquivos de dicionário do Google Drive...")
+      for (const year in dictionaryFolders) {
+        const folderId = dictionaryFolders[year]
+        const response = await this.drive.files.list({
+          q: `'${folderId}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false and name contains 'Dicionário'`,
+          fields: "files(id, name)",
+        })
+
+        for (const file of response.data.files) {
+          const rodada = this._extractRodadaFromDictName(file.name)
+          if (rodada) {
+            if (allDictionaries[rodada]) {
+              console.warn(`⚠️  Dicionário duplicado para Rodada ${rodada}. Usando o último encontrado: ${file.name}`)
+            }
+            allDictionaries[rodada] = file.id
+          } else {
+            console.warn(`⚠️  Não foi possível extrair número da rodada do arquivo: ${file.name}`)
+          }
+        }
+      }
+      console.log(`Encontrados ${Object.keys(allDictionaries).length} arquivos de dicionário.`)
+      return allDictionaries
+    } catch (error) {
+      console.error("Erro ao listar arquivos de dicionário:", error)
+      throw error
+    }
+  }
+
   async listAllSurveyFiles() {
     try {
       if (this.cache.allSurveyFiles && this._isCacheValid()) {

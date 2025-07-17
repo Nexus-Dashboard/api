@@ -11,6 +11,7 @@ const migrationRoutes = require("./routes/migrationRoutes")
 const maintenanceRoutes = require("./routes/maintenanceRoutes")
 const authRoutes = require("./routes/authRoutes")
 const userRoutes = require("./routes/userRoutes")
+const googleRoutes = require("./routes/googleRoutes")
 
 const app = express()
 
@@ -56,6 +57,7 @@ app.use("/api/users", userRoutes)
 app.use("/api/data", dataRoutes)
 app.use("/api/migration", migrationRoutes)
 app.use("/api/maintenance", maintenanceRoutes)
+app.use("/api/google", googleRoutes)
 
 // Middleware de tratamento de erros 404
 app.use("*", (req, res) => {

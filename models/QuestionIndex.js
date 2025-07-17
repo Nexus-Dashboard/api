@@ -12,6 +12,12 @@ const QuestionIndexSchema = new mongoose.Schema(
     map: String,
     sample: String,
     date: String,
+    possibleAnswers: [
+      {
+        value: String,
+        label: String,
+      },
+    ],
   },
   { timestamps: true },
 )

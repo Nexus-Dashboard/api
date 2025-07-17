@@ -70,6 +70,68 @@ router.get("/themes", async (req, res) => {
   }
 })
 
+// Adicionar esta nova rota após a rota GET /api/data/themes
+
+// GET /api/data/questions/all
+// Retorna todas as perguntas do índice com paginação opcional
+router.get("/questions/all", async (req, res) => {
+  try {
+    const { page = 1, limit = 50, search, index: themeFilter } = req.query
+
+    console.log("🎯 Buscando todas as perguntas do índice...")
+
+    const QuestionIndex = await getModel("QuestionIndex", "main")
+
+    // Construir filtros
+    const filters = {}
+    if (search) {
+      filters.$or = [
+        { variable: { $regex: search, $options: "i" } },
+        { questionText: { $regex: search, $options: "i" } },
+        { label: { $regex: search, $options: "i" } },
+        { surveyName: { $regex: search, $options: "i" } },
+      ]
+    }
+    if (themeFilter) {
+      filters.index = themeFilter
+    }
+
+    // Paginação
+    const skip = (page - 1) * limit
+    const total = await QuestionIndex.countDocuments(filters)
+
+    const questions = await QuestionIndex.find(filters)
+      .sort({ surveyNumber: 1, variable: 1 })
+      .skip(skip)
+      .limit(Number.parseInt(limit))
+      .lean()
+
+    console.log(`✅ Encontradas ${questions.length} perguntas (total: ${total})`)
+
+    res.json({
+      success: true,
+      data: {
+        questions: questions,
+        pagination: {
+          currentPage: Number.parseInt(page),
+          totalPages: Math.ceil(total / limit),
+          totalQuestions: total,
+          hasNext: skip + questions.length < total,
+          hasPrev: page > 1,
+          limit: Number.parseInt(limit),
+        },
+      },
+    })
+  } catch (error) {
+    console.error("❌ Erro ao buscar todas as perguntas:", error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
 // GET /api/data/themes/:themeSlug/questions
 router.get("/themes/:themeSlug/questions", async (req, res) => {
   try {
