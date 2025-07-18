@@ -541,7 +541,7 @@ router.get("/search/questions", async (req, res) => {
 })
 
 // POST /api/data/themes/questions
-router.post("/themes/questions", async (req, res) => {
+router.get("/themes/questions", async (req, res) => {
   try {
     const { theme } = req.body
 

@@ -176,7 +176,7 @@ router.get("/sync-index-answers", ensureServiceInitialized, async (req, res) => 
 
 // POST /api/migration/update-variables
 // Atualiza o campo variable no QuestionIndex com os valores da planilha
-router.post("/update-variables", ensureServiceInitialized, async (req, res) => {
+router.get("/update-variables", ensureServiceInitialized, async (req, res) => {
   try {
     console.log("Iniciando atualização de variáveis no índice...")
 
