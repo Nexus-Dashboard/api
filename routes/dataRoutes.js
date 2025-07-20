@@ -1325,4 +1325,439 @@ router.post("/question/:questionCode/responses", async (req, res) => {
   }
 })
 
+// Adicionar após as rotas existentes, antes do module.exports
+
+// GET /api/data/themes/:theme/questions-grouped
+// Agrupa perguntas de um tema pelo questionText, mostrando todas as variáveis e rodadas
+router.get("/themes/:theme/questions-grouped", async (req, res) => {
+  try {
+    const { theme } = req.params
+    console.log(`🎯 Agrupando perguntas do tema: ${theme}`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    // Buscar todas as perguntas do tema
+    const allQuestions = await QuestionIndex.find({
+      index: theme,
+    })
+      .select("variable questionText surveyNumber surveyName date")
+      .sort({ questionText: 1, surveyNumber: 1 })
+      .lean()
+
+    if (allQuestions.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Nenhuma pergunta encontrada para o tema '${theme}'`,
+      })
+    }
+
+    // Agrupar por questionText
+    const groupedQuestions = new Map()
+
+    for (const question of allQuestions) {
+      const key = question.questionText.trim()
+
+      if (!groupedQuestions.has(key)) {
+        groupedQuestions.set(key, {
+          questionText: question.questionText,
+          theme: theme,
+          variables: new Set(),
+          rounds: new Set(),
+          variations: [],
+          totalVariations: 0,
+        })
+      }
+
+      const group = groupedQuestions.get(key)
+      group.variables.add(question.variable)
+      group.rounds.add(question.surveyNumber)
+      group.variations.push({
+        variable: question.variable,
+        surveyNumber: question.surveyNumber,
+        surveyName: question.surveyName,
+        date: question.date,
+      })
+      group.totalVariations++
+    }
+
+    // Converter para array e formatar
+    const result = Array.from(groupedQuestions.values()).map((group, index) => ({
+      id: `${theme}-question-${index + 1}`,
+      questionText: group.questionText,
+      shortText: group.questionText.length > 200 ? group.questionText.substring(0, 200) + "..." : group.questionText,
+      theme: group.theme,
+      variables: Array.from(group.variables).sort(),
+      rounds: Array.from(group.rounds).sort((a, b) => Number.parseInt(a) - Number.parseInt(b)),
+      totalVariations: group.totalVariations,
+      variations: group.variations.sort((a, b) => Number.parseInt(a.surveyNumber) - Number.parseInt(b.surveyNumber)),
+      // Dados para usar no POST endpoint
+      searchData: {
+        theme: group.theme,
+        questionText: group.questionText,
+      },
+    }))
+
+    console.log(`✅ Encontrados ${result.length} grupos de perguntas para o tema '${theme}'`)
+
+    res.json({
+      success: true,
+      theme: theme,
+      totalGroups: result.length,
+      totalQuestions: allQuestions.length,
+      questionGroups: result,
+      usage: {
+        message: "Use os dados em 'searchData' para buscar o histórico completo da pergunta",
+        endpoint: "POST /api/data/question/grouped/responses",
+        example: {
+          theme: theme,
+          questionText: result.length > 0 ? result[0].questionText : "Exemplo de texto da pergunta",
+        },
+      },
+    })
+  } catch (error) {
+    console.error(`❌ Erro ao agrupar perguntas do tema:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// POST /api/data/question/grouped/responses
+// Busca histórico completo de uma pergunta agrupada por questionText + theme
+router.post("/question/grouped/responses", async (req, res) => {
+  try {
+    const { theme, questionText } = req.body
+
+    // Validações
+    if (!theme) {
+      return res.status(400).json({
+        success: false,
+        message: "Campo 'theme' é obrigatório no body da requisição",
+      })
+    }
+
+    if (!questionText) {
+      return res.status(400).json({
+        success: false,
+        message: "Campo 'questionText' é obrigatório no body da requisição",
+      })
+    }
+
+    console.log(`⚡️ Busca agrupada para pergunta no tema: ${theme}`)
+    console.log(`📋 Texto da pergunta: ${questionText.substring(0, 100)}...`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    // Buscar TODAS as perguntas com o mesmo questionText e theme
+    const identicalQuestions = await QuestionIndex.find({
+      index: theme,
+      questionText: questionText.trim(),
+    }).lean()
+
+    if (identicalQuestions.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Nenhuma pergunta encontrada com o texto fornecido no tema '${theme}'.`,
+      })
+    }
+
+    console.log(`✅ Encontradas ${identicalQuestions.length} variações da pergunta`)
+
+    // Extrair todas as variáveis e rodadas
+    const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
+    const surveyNumbers = identicalQuestions.map((q) => q.surveyNumber)
+    const variablesByRound = identicalQuestions.reduce((acc, q) => {
+      acc[q.surveyNumber] = q.variable
+      return acc
+    }, {})
+
+    console.log(`📋 Variáveis encontradas: ${questionCodes.join(", ")}`)
+    console.log(`📋 Rodadas correspondentes: ${surveyNumbers.join(", ")}`)
+
+    const responseModels = await getAllModels("Response")
+    const rawData = []
+
+    const demographicFields = [
+      "UF",
+      "Regiao",
+      "PF1",
+      "PF2#1",
+      "PF2_faixas",
+      "PF3",
+      "PF4",
+      "PF5",
+      "PF6",
+      "PF7",
+      "PF8",
+      "PF9",
+      "PF10",
+    ]
+
+    // Buscar dados de todas as rodadas
+    for (const Response of responseModels) {
+      console.log(`🔍 Processando banco: ${Response.db.name}`)
+
+      const pipeline = [
+        {
+          $match: {
+            "answers.k": { $in: questionCodes },
+            rodada: { $in: surveyNumbers.map((s) => Number.parseInt(s)) },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            year: 1,
+            rodada: 1,
+            mainAnswer: {
+              $let: {
+                vars: { ans: { $filter: { input: "$answers", cond: { $in: ["$$this.k", questionCodes] } } } },
+                in: { $arrayElemAt: ["$$ans.v", 0] },
+              },
+            },
+            questionVariable: {
+              $let: {
+                vars: { ans: { $filter: { input: "$answers", cond: { $in: ["$$this.k", questionCodes] } } } },
+                in: { $arrayElemAt: ["$$ans.k", 0] },
+              },
+            },
+            weight: {
+              $let: {
+                vars: {
+                  weightAns: {
+                    $filter: { input: "$answers", cond: { $regexMatch: { input: "$$this.k", regex: /weights/i } } },
+                  },
+                },
+                in: {
+                  $ifNull: [
+                    {
+                      $toDouble: {
+                        $replaceAll: {
+                          input: { $toString: { $arrayElemAt: ["$$weightAns.v", 0] } },
+                          find: ",",
+                          replacement: ".",
+                        },
+                      },
+                    },
+                    1.0,
+                  ],
+                },
+              },
+            },
+            demographics: {
+              $arrayToObject: {
+                $map: {
+                  input: { $filter: { input: "$answers", cond: { $in: ["$$this.k", demographicFields] } } },
+                  as: "item",
+                  in: { k: "$$item.k", v: "$$item.v" },
+                },
+              },
+            },
+          },
+        },
+        { $match: { mainAnswer: { $exists: true, $ne: null, $ne: "" } } },
+      ]
+
+      const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 120000 })
+      rawData.push(...results)
+    }
+
+    console.log(`📊 Total de registros brutos coletados: ${rawData.length}`)
+
+    if (rawData.length === 0) {
+      return res.json({
+        success: true,
+        theme: theme,
+        questionText: questionText,
+        questionInfo: {
+          variables: questionCodes,
+          rounds: surveyNumbers,
+          totalVariations: identicalQuestions.length,
+        },
+        historicalData: [],
+        message: "Nenhuma resposta encontrada para esta pergunta nas rodadas correspondentes.",
+        demographicFields: demographicFields,
+      })
+    }
+
+    // Processar dados agrupados
+    const processedData = new Map()
+
+    for (const doc of rawData) {
+      const roundKey = `${doc.year}-R${doc.rodada}`
+      if (!processedData.has(roundKey)) {
+        processedData.set(roundKey, {
+          year: doc.year,
+          rodada: doc.rodada,
+          period: roundKey,
+          variable: variablesByRound[doc.rodada.toString()] || doc.questionVariable,
+          totalResponses: 0,
+          totalWeightedResponses: 0,
+          distribution: new Map(),
+        })
+      }
+      const roundData = processedData.get(roundKey)
+      roundData.totalResponses += 1
+      roundData.totalWeightedResponses += doc.weight
+
+      if (!roundData.distribution.has(doc.mainAnswer)) {
+        roundData.distribution.set(doc.mainAnswer, {
+          response: doc.mainAnswer,
+          count: 0,
+          weightedCount: 0,
+          demographics: {},
+        })
+      }
+      const answerData = roundData.distribution.get(doc.mainAnswer)
+      answerData.count += 1
+      answerData.weightedCount += doc.weight
+
+      for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
+        if (demoValue && demoValue !== "") {
+          if (!answerData.demographics[demoField]) {
+            answerData.demographics[demoField] = new Map()
+          }
+          const demoFieldMap = answerData.demographics[demoField]
+          if (!demoFieldMap.has(demoValue)) {
+            demoFieldMap.set(demoValue, { response: demoValue, count: 0, weightedCount: 0 })
+          }
+          const demoValueData = demoFieldMap.get(demoValue)
+          demoValueData.count += 1
+          demoValueData.weightedCount += doc.weight
+        }
+      }
+    }
+
+    const finalHistoricalData = Array.from(processedData.values())
+      .map((round) => {
+        round.distribution = Array.from(round.distribution.values())
+          .map((answer) => {
+            answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
+            Object.keys(answer.demographics).forEach((demoField) => {
+              answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
+                .map((d) => ({ ...d, weightedCount: Math.round(d.weightedCount * 100) / 100 }))
+                .sort((a, b) => b.weightedCount - a.weightedCount)
+            })
+            return answer
+          })
+          .sort((a, b) => b.weightedCount - a.weightedCount)
+        round.totalWeightedResponses = Math.round(round.totalWeightedResponses * 100) / 100
+        return round
+      })
+      .sort((a, b) => b.year - a.year || b.rodada - a.rodada)
+
+    const response = {
+      success: true,
+      searchMethod: "Agrupado por questionText + theme",
+      theme: theme,
+      questionText: questionText,
+      questionInfo: {
+        variables: questionCodes,
+        rounds: surveyNumbers,
+        totalVariations: identicalQuestions.length,
+        variablesByRound: variablesByRound,
+      },
+      historicalData: finalHistoricalData,
+      demographicFields: demographicFields,
+      summary: {
+        totalRoundsWithData: finalHistoricalData.length,
+        totalResponses: finalHistoricalData.reduce((sum, round) => sum + round.totalResponses, 0),
+        totalWeightedResponses:
+          Math.round(finalHistoricalData.reduce((sum, round) => sum + round.totalWeightedResponses, 0) * 100) / 100,
+      },
+    }
+
+    console.log(`✅ Resposta agrupada enviada: ${finalHistoricalData.length} rodadas com dados`)
+    res.json(response)
+  } catch (error) {
+    console.error(`❌ Erro na busca agrupada:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// GET /api/data/themes/:theme/questions-summary
+// Resumo rápido das perguntas de um tema agrupadas
+router.get("/themes/:theme/questions-summary", async (req, res) => {
+  try {
+    const { theme } = req.params
+    console.log(`📊 Gerando resumo das perguntas do tema: ${theme}`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    const summary = await QuestionIndex.aggregate([
+      {
+        $match: {
+          index: theme,
+        },
+      },
+      {
+        $group: {
+          _id: "$questionText",
+          variables: { $addToSet: "$variable" },
+          rounds: { $addToSet: "$surveyNumber" },
+          count: { $sum: 1 },
+          firstDate: { $min: "$date" },
+          lastDate: { $max: "$date" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          questionText: "$_id",
+          shortText: {
+            $cond: {
+              if: { $gt: [{ $strLenCP: "$_id" }, 150] },
+              then: { $concat: [{ $substr: ["$_id", 0, 150] }, "..."] },
+              else: "$_id",
+            },
+          },
+          variables: 1,
+          rounds: 1,
+          totalVariations: "$count",
+          dateRange: {
+            first: "$firstDate",
+            last: "$lastDate",
+          },
+        },
+      },
+      {
+        $sort: { totalVariations: -1, questionText: 1 },
+      },
+    ])
+
+    console.log(`✅ Resumo gerado: ${summary.length} grupos de perguntas`)
+
+    res.json({
+      success: true,
+      theme: theme,
+      totalGroups: summary.length,
+      questionGroups: summary.map((group, index) => ({
+        id: `${theme}-summary-${index + 1}`,
+        ...group,
+        searchData: {
+          theme: theme,
+          questionText: group.questionText,
+        },
+      })),
+      usage: {
+        message: "Use os dados em 'searchData' para buscar o histórico completo",
+        endpoint: "POST /api/data/question/grouped/responses",
+      },
+    })
+  } catch (error) {
+    console.error(`❌ Erro ao gerar resumo do tema:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
 module.exports = router
