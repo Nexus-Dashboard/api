@@ -196,25 +196,30 @@ router.get("/themes/:themeSlug/questions", async (req, res) => {
 router.get("/question/:questionCode/responses", async (req, res) => {
   try {
     const { questionCode } = req.params
+    const { theme } = req.query // Get theme from query parameters
     const questionCodeUpper = questionCode.toUpperCase()
 
-    console.log(`⚡️ Executando busca OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper}`)
+    console.log(
+      `⚡️ Executando busca OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper} e tema ${theme}`,
+    )
 
     const QuestionIndex = await getModel("QuestionIndex")
     const questionInfo = await QuestionIndex.findOne({
       variable: questionCodeUpper,
+      index: theme, // Filter by theme
     }).lean()
 
     if (!questionInfo) {
       return res.status(404).json({
         success: false,
-        message: `Pergunta '${questionCode}' não encontrada no índice.`,
+        message: `Pergunta '${questionCode}' não encontrada no índice para o tema '${theme}'.`,
       })
     }
 
     const identicalQuestions = await QuestionIndex.find({
       questionText: questionInfo.questionText,
       variable: { $exists: true, $ne: null, $ne: "" },
+      index: theme, // Filter by theme
     }).lean()
 
     const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
@@ -237,6 +242,7 @@ router.get("/question/:questionCode/responses", async (req, res) => {
       "PF7",
       "PF8",
       "PF9",
+      "PF10",
     ]
 
     // 1. Fetch all raw data in one go from all DBs
@@ -541,7 +547,7 @@ router.get("/search/questions", async (req, res) => {
 })
 
 // POST /api/data/themes/questions
-router.get("/themes/questions", async (req, res) => {
+router.post("/themes/questions", async (req, res) => {
   try {
     const { theme } = req.body
 
