@@ -192,43 +192,336 @@ router.get("/themes/:themeSlug/questions", async (req, res) => {
   }
 })
 
-// GET /api/data/question/:questionCode/responses - VERSÃO OTIMIZADA COM TODOS OS CAMPOS DEMOGRÁFICOS
+// GET /api/data/question/:questionCode/responses - VERSÃO CORRIGIDA PARA BUSCAR APENAS A PERGUNTA ESPECÍFICA
 router.get("/question/:questionCode/responses", async (req, res) => {
   try {
     const { questionCode } = req.params
-    const { theme } = req.query // Get theme from query parameters
-    const questionCodeUpper = questionCode.toUpperCase()
+    const { theme, surveyNumber, questionText, keywords } = req.query
 
-    console.log(
-      `⚡️ Executando busca OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper} e tema ${theme}`,
-    )
+    // CORREÇÃO 1: Decodificar a URL para lidar com caracteres especiais como #
+    const questionCodeDecoded = decodeURIComponent(questionCode).toUpperCase()
+
+    console.log(`⚡️ Executando busca OTIMIZADA para pergunta específica ${questionCodeDecoded} no tema ${theme}`)
 
     const QuestionIndex = await getModel("QuestionIndex")
-    const questionInfo = await QuestionIndex.findOne({
-      variable: questionCodeUpper,
-      index: theme, // Filter by theme
-    }).lean()
+
+    // CORREÇÃO 2: Melhorar a lógica de busca da pergunta específica
+    const questionFilters = {
+      variable: questionCodeDecoded,
+    }
+
+    if (theme) {
+      questionFilters.index = theme
+    }
+
+    if (surveyNumber) {
+      questionFilters.surveyNumber = surveyNumber.toString()
+    }
+
+    // CORREÇÃO 3: Melhorar a busca por questionText
+    if (questionText) {
+      // Decodificar o texto da pergunta
+      const decodedQuestionText = decodeURIComponent(questionText)
+      console.log(`🔍 Buscando por texto da pergunta: ${decodedQuestionText.substring(0, 100)}...`)
+
+      // Usar busca exata primeiro, depois busca por regex se não encontrar
+      const exactMatch = await QuestionIndex.findOne({
+        ...questionFilters,
+        questionText: decodedQuestionText,
+      }).lean()
+
+      if (exactMatch) {
+        console.log(`✅ Encontrada correspondência exata para o texto da pergunta`)
+        const response = await processSpecificQuestion(exactMatch, questionCodeDecoded, theme)
+        return res.json(response)
+      } else {
+        // Se não encontrar correspondência exata, tentar busca por regex
+        questionFilters.questionText = {
+          $regex: decodedQuestionText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          $options: "i",
+        }
+      }
+    }
+
+    // CORREÇÃO 4: Adicionar busca por palavras-chave como alternativa
+    if (keywords && !questionText) {
+      const keywordArray = keywords.split(",").map((k) => k.trim())
+      const keywordRegex = keywordArray
+        .map((keyword) => `(?=.*${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`)
+        .join("")
+      questionFilters.questionText = { $regex: keywordRegex, $options: "i" }
+      console.log(`🔍 Buscando por palavras-chave: ${keywordArray.join(", ")}`)
+    }
+
+    console.log(`🔍 Filtros de busca:`, JSON.stringify(questionFilters, null, 2))
+
+    const questionInfo = await QuestionIndex.findOne(questionFilters).lean()
+
+    if (!questionInfo) {
+      // CORREÇÃO 5: Melhorar mensagem de erro com sugestões
+      console.log(`❌ Pergunta não encontrada com os filtros especificados`)
+
+      // Tentar buscar apenas pela variável para ver se existe
+      const variableExists = await QuestionIndex.findOne({ variable: questionCodeDecoded }).lean()
+
+      if (variableExists) {
+        const allVariations = await QuestionIndex.find({ variable: questionCodeDecoded }).lean()
+        return res.status(404).json({
+          success: false,
+          message: `Pergunta '${questionCode}' não encontrada com os filtros especificados.`,
+          suggestions: {
+            availableThemes: [...new Set(allVariations.map((v) => v.index))],
+            availableRounds: [...new Set(allVariations.map((v) => v.surveyNumber))],
+            totalVariations: allVariations.length,
+          },
+          hint: "Use /api/data/question/" + questionCode + "/variations para ver todas as opções disponíveis",
+        })
+      } else {
+        return res.status(404).json({
+          success: false,
+          message: `Pergunta '${questionCode}' não encontrada no índice.`,
+        })
+      }
+    }
+
+    const response = await processSpecificQuestion(questionInfo, questionCodeDecoded, theme)
+    res.json(response)
+  } catch (error) {
+    console.error(`❌ Erro na busca OTIMIZADA para ${req.params.questionCode}:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// CORREÇÃO 6: Criar função auxiliar para processar pergunta específica
+async function processSpecificQuestion(questionInfo, questionCodeDecoded, theme) {
+  console.log(`📋 Pergunta encontrada: ${questionInfo.questionText.substring(0, 100)}...`)
+  console.log(`📋 Rodada da pergunta: ${questionInfo.surveyNumber}`)
+
+  // Buscar APENAS perguntas que tenham exatamente o mesmo questionText, variable E index (tema)
+  const QuestionIndex = await getModel("QuestionIndex")
+  const identicalQuestions = await QuestionIndex.find({
+    questionText: questionInfo.questionText,
+    variable: questionCodeDecoded,
+    index: questionInfo.index, // Usar o index da pergunta encontrada
+  }).lean()
+
+  const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
+  const surveyNumbers = identicalQuestions.map((q) => q.surveyNumber)
+
+  console.log(`📋 Perguntas idênticas encontradas: ${questionCodes.join(", ")}`)
+  console.log(`📋 Rodadas correspondentes: ${surveyNumbers.join(", ")}`)
+
+  const responseModels = await getAllModels("Response")
+  const rawData = []
+
+  const demographicFields = [
+    "UF",
+    "Regiao",
+    "PF1",
+    "PF2#1",
+    "PF2_faixas",
+    "PF3",
+    "PF4",
+    "PF5",
+    "PF6",
+    "PF7",
+    "PF8",
+    "PF9",
+    "PF10",
+  ]
+
+  // Buscar dados apenas das rodadas específicas
+  for (const Response of responseModels) {
+    console.log(`🔍 Processando banco: ${Response.db.name}`)
+
+    const pipeline = [
+      {
+        $match: {
+          "answers.k": { $in: questionCodes },
+          rodada: { $in: surveyNumbers.map((s) => Number.parseInt(s)) },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          year: 1,
+          rodada: 1,
+          mainAnswer: {
+            $let: {
+              vars: { ans: { $filter: { input: "$answers", cond: { $in: ["$$this.k", questionCodes] } } } },
+              in: { $arrayElemAt: ["$$ans.v", 0] },
+            },
+          },
+          weight: {
+            $let: {
+              vars: {
+                weightAns: {
+                  $filter: { input: "$answers", cond: { $regexMatch: { input: "$$this.k", regex: /weights/i } } },
+                },
+              },
+              in: {
+                $ifNull: [
+                  {
+                    $toDouble: {
+                      $replaceAll: {
+                        input: { $toString: { $arrayElemAt: ["$$weightAns.v", 0] } },
+                        find: ",",
+                        replacement: ".",
+                      },
+                    },
+                  },
+                  1.0,
+                ],
+              },
+            },
+          },
+          demographics: {
+            $arrayToObject: {
+              $map: {
+                input: { $filter: { input: "$answers", cond: { $in: ["$$this.k", demographicFields] } } },
+                as: "item",
+                in: { k: "$$item.k", v: "$$item.v" },
+              },
+            },
+          },
+        },
+      },
+      { $match: { mainAnswer: { $exists: true, $ne: null, $ne: "" } } },
+    ]
+
+    const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 120000 })
+    rawData.push(...results)
+  }
+
+  console.log(`📊 Total de registros brutos coletados: ${rawData.length}`)
+
+  if (rawData.length === 0) {
+    return {
+      success: true,
+      questionCode: questionCodeDecoded,
+      questionInfo,
+      historicalData: [],
+      message: "Nenhuma resposta encontrada para esta pergunta específica nas rodadas correspondentes.",
+      demographicFields: demographicFields,
+    }
+  }
+
+  // Processar dados (mesmo código anterior)
+  const processedData = new Map()
+
+  for (const doc of rawData) {
+    const roundKey = `${doc.year}-R${doc.rodada}`
+    if (!processedData.has(roundKey)) {
+      processedData.set(roundKey, {
+        year: doc.year,
+        rodada: doc.rodada,
+        period: roundKey,
+        totalResponses: 0,
+        totalWeightedResponses: 0,
+        distribution: new Map(),
+      })
+    }
+    const roundData = processedData.get(roundKey)
+    roundData.totalResponses += 1
+    roundData.totalWeightedResponses += doc.weight
+
+    if (!roundData.distribution.has(doc.mainAnswer)) {
+      roundData.distribution.set(doc.mainAnswer, {
+        response: doc.mainAnswer,
+        count: 0,
+        weightedCount: 0,
+        demographics: {},
+      })
+    }
+    const answerData = roundData.distribution.get(doc.mainAnswer)
+    answerData.count += 1
+    answerData.weightedCount += doc.weight
+
+    for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
+      if (demoValue && demoValue !== "") {
+        if (!answerData.demographics[demoField]) {
+          answerData.demographics[demoField] = new Map()
+        }
+        const demoFieldMap = answerData.demographics[demoField]
+        if (!demoFieldMap.has(demoValue)) {
+          demoFieldMap.set(demoValue, { response: demoValue, count: 0, weightedCount: 0 })
+        }
+        const demoValueData = demoFieldMap.get(demoValue)
+        demoValueData.count += 1
+        demoValueData.weightedCount += doc.weight
+      }
+    }
+  }
+
+  const finalHistoricalData = Array.from(processedData.values())
+    .map((round) => {
+      round.distribution = Array.from(round.distribution.values())
+        .map((answer) => {
+          answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
+          Object.keys(answer.demographics).forEach((demoField) => {
+            answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
+              .map((d) => ({ ...d, weightedCount: Math.round(d.weightedCount * 100) / 100 }))
+              .sort((a, b) => b.weightedCount - a.weightedCount)
+          })
+          return answer
+        })
+        .sort((a, b) => b.weightedCount - a.weightedCount)
+      round.totalWeightedResponses = Math.round(round.totalWeightedResponses * 100) / 100
+      return round
+    })
+    .sort((a, b) => b.year - a.year || b.rodada - a.rodada)
+
+  return {
+    success: true,
+    questionCode: questionCodeDecoded,
+    questionInfo,
+    historicalData: finalHistoricalData,
+    demographicFields: demographicFields,
+    availableRounds: surveyNumbers,
+  }
+}
+
+// GET /api/data/question/:questionCode/responses/:questionId - BUSCA POR ID ESPECÍFICO DA PERGUNTA
+router.get("/question/:questionCode/responses/:questionId", async (req, res) => {
+  try {
+    const { questionCode, questionId } = req.params
+    const questionCodeUpper = questionCode.toUpperCase()
+
+    console.log(`⚡️ Executando busca por ID específico da pergunta: ${questionId}`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    // Buscar a pergunta específica pelo ID
+    const questionInfo = await QuestionIndex.findById(questionId).lean()
 
     if (!questionInfo) {
       return res.status(404).json({
         success: false,
-        message: `Pergunta '${questionCode}' não encontrada no índice para o tema '${theme}'.`,
+        message: `Pergunta com ID '${questionId}' não encontrada.`,
       })
     }
 
-    const identicalQuestions = await QuestionIndex.find({
-      questionText: questionInfo.questionText,
-      variable: { $exists: true, $ne: null, $ne: "" },
-      index: theme, // Filter by theme
-    }).lean()
+    if (questionInfo.variable.toUpperCase() !== questionCodeUpper) {
+      return res.status(400).json({
+        success: false,
+        message: `ID da pergunta não corresponde à variável ${questionCodeUpper}.`,
+      })
+    }
 
-    const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
-    console.log(`📋 Perguntas com texto idêntico: ${questionCodes.join(", ")}`)
+    console.log(`📋 Pergunta encontrada: ${questionInfo.questionText}`)
+    console.log(`📋 Rodada da pergunta: ${questionInfo.surveyNumber}`)
+
+    // Buscar apenas esta pergunta específica (mesmo ID)
+    const questionCodes = [questionInfo.variable.toUpperCase()]
+    const surveyNumbers = [questionInfo.surveyNumber]
 
     const responseModels = await getAllModels("Response")
     const rawData = []
 
-    // TODOS os campos demográficos: originais + UF + REGIAO
     const demographicFields = [
       "UF",
       "Regiao",
@@ -245,12 +538,17 @@ router.get("/question/:questionCode/responses", async (req, res) => {
       "PF10",
     ]
 
-    // 1. Fetch all raw data in one go from all DBs
+    // Buscar dados apenas da rodada específica
     for (const Response of responseModels) {
       console.log(`🔍 Processando banco: ${Response.db.name}`)
 
       const pipeline = [
-        { $match: { "answers.k": { $in: questionCodes } } },
+        {
+          $match: {
+            "answers.k": { $in: questionCodes },
+            rodada: { $in: surveyNumbers.map((s) => Number.parseInt(s)) },
+          },
+        },
         {
           $project: {
             _id: 0,
@@ -320,7 +618,18 @@ router.get("/question/:questionCode/responses", async (req, res) => {
 
     console.log(`📊 Total de registros brutos coletados: ${rawData.length}`)
 
-    // 2. Process raw data in memory
+    if (rawData.length === 0) {
+      return res.json({
+        success: true,
+        questionCode: questionCodeUpper,
+        questionInfo,
+        historicalData: [],
+        message: "Nenhuma resposta encontrada para esta pergunta específica.",
+        demographicFields: demographicFields,
+      })
+    }
+
+    // Processar dados (mesmo código de processamento da rota anterior)
     const processedData = new Map()
 
     for (const doc of rawData) {
@@ -351,7 +660,6 @@ router.get("/question/:questionCode/responses", async (req, res) => {
       answerData.count += 1
       answerData.weightedCount += doc.weight
 
-      // Processar TODOS os campos demográficos
       for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
         if (demoValue && demoValue !== "") {
           if (!answerData.demographics[demoField]) {
@@ -368,14 +676,11 @@ router.get("/question/:questionCode/responses", async (req, res) => {
       }
     }
 
-    // 3. Finalize structure (convert maps to sorted arrays)
     const finalHistoricalData = Array.from(processedData.values())
       .map((round) => {
         round.distribution = Array.from(round.distribution.values())
           .map((answer) => {
             answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
-
-            // Processar todos os campos demográficos
             Object.keys(answer.demographics).forEach((demoField) => {
               answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
                 .map((d) => ({
@@ -395,15 +700,344 @@ router.get("/question/:questionCode/responses", async (req, res) => {
     const response = {
       success: true,
       questionCode: questionCodeUpper,
+      questionId: questionId,
       questionInfo,
       historicalData: finalHistoricalData,
-      demographicFields: demographicFields, // Lista dos campos incluídos
+      demographicFields: demographicFields,
+      specificRound: questionInfo.surveyNumber,
     }
 
-    console.log(`✅ Resposta OTIMIZADA com TODOS os campos demográficos para ${questionCodeUpper} enviada.`)
+    console.log(`✅ Resposta para pergunta específica ${questionCodeUpper} (ID: ${questionId}) enviada.`)
     res.json(response)
   } catch (error) {
-    console.error(`❌ Erro na busca OTIMIZADA para ${req.params.questionCode}:`, error)
+    console.error(`❌ Erro na busca por ID específico:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// GET /api/data/question/:questionCode/variations - LISTA TODAS AS VARIAÇÕES DE UMA PERGUNTA
+router.get("/question/:questionCode/variations", async (req, res) => {
+  try {
+    const { questionCode } = req.params
+    const { theme } = req.query
+
+    // CORREÇÃO: Decodificar a URL para lidar com caracteres especiais
+    const questionCodeDecoded = decodeURIComponent(questionCode).toUpperCase()
+
+    console.log(`🔍 Buscando todas as variações da pergunta ${questionCodeDecoded}`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    const filters = { variable: questionCodeDecoded }
+    if (theme) {
+      filters.index = theme
+    }
+
+    const variations = await QuestionIndex.find(filters)
+      .select("_id variable questionText surveyNumber surveyName index date")
+      .sort({ surveyNumber: 1 })
+      .lean()
+
+    if (variations.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Nenhuma variação encontrada para a pergunta '${questionCode}'${theme ? ` no tema '${theme}'` : ""}.`,
+      })
+    }
+
+    console.log(`✅ Encontradas ${variations.length} variações da pergunta ${questionCodeDecoded}`)
+
+    res.json({
+      success: true,
+      questionCode: questionCodeDecoded,
+      theme: theme || "Todos os temas",
+      totalVariations: variations.length,
+      variations: variations.map((v) => ({
+        id: v._id,
+        surveyNumber: v.surveyNumber,
+        surveyName: v.surveyName,
+        questionText: v.questionText,
+        theme: v.index,
+        date: v.date,
+        shortText: v.questionText.length > 100 ? v.questionText.substring(0, 100) + "..." : v.questionText,
+      })),
+    })
+  } catch (error) {
+    console.error(`❌ Erro ao buscar variações da pergunta:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// GET /api/data/question/:questionCode/preview - PRÉVIA DAS VARIAÇÕES COM TEXTO RESUMIDO
+router.get("/question/:questionCode/preview", async (req, res) => {
+  try {
+    const { questionCode } = req.params
+    const { theme } = req.query
+
+    const questionCodeDecoded = decodeURIComponent(questionCode).toUpperCase()
+    console.log(`🔍 Buscando prévia das variações da pergunta ${questionCodeDecoded}`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    const filters = { variable: questionCodeDecoded }
+    if (theme) {
+      filters.index = theme
+    }
+
+    const variations = await QuestionIndex.find(filters)
+      .select("_id variable questionText surveyNumber surveyName index date possibleAnswers")
+      .sort({ surveyNumber: 1 })
+      .lean()
+
+    if (variations.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Nenhuma variação encontrada para a pergunta '${questionCode}'${theme ? ` no tema '${theme}'` : ""}.`,
+      })
+    }
+
+    // Extrair palavras-chave principais de cada pergunta
+    const extractKeywords = (text) => {
+      if (!text) return []
+
+      // Palavras comuns a ignorar
+      const stopWords = [
+        "o",
+        "a",
+        "os",
+        "as",
+        "de",
+        "da",
+        "do",
+        "das",
+        "dos",
+        "em",
+        "na",
+        "no",
+        "nas",
+        "nos",
+        "para",
+        "por",
+        "com",
+        "sem",
+        "sobre",
+        "entre",
+        "até",
+        "desde",
+        "durante",
+        "através",
+        "você",
+        "sua",
+        "seu",
+        "suas",
+        "seus",
+        "que",
+        "qual",
+        "quais",
+        "como",
+        "quando",
+        "onde",
+        "estimulada",
+        "única",
+        "não",
+        "ler",
+        "sim",
+        "ou",
+        "e",
+        "é",
+        "são",
+        "foi",
+        "será",
+        "tem",
+        "ter",
+        "teve",
+        "terá",
+        "governo",
+        "brasileiro",
+        "brasil",
+        "federal",
+      ]
+
+      return text
+        .toLowerCase()
+        .replace(/[^\w\s]/g, " ") // Remove pontuação
+        .split(/\s+/)
+        .filter((word) => word.length > 3 && !stopWords.includes(word))
+        .slice(0, 5) // Pega as 5 primeiras palavras relevantes
+    }
+
+    const previewData = variations.map((v) => {
+      const keywords = extractKeywords(v.questionText)
+      const shortText = v.questionText.length > 150 ? v.questionText.substring(0, 150) + "..." : v.questionText
+
+      // Identificar o tema principal da pergunta
+      let mainTopic = "Geral"
+      const text = v.questionText.toLowerCase()
+
+      if (text.includes("lula") || text.includes("bolsonaro") || text.includes("presidente")) {
+        mainTopic = "Política/Eleições"
+      } else if (
+        text.includes("economia") ||
+        text.includes("inflação") ||
+        text.includes("emprego") ||
+        text.includes("tarifa")
+      ) {
+        mainTopic = "Economia"
+      } else if (text.includes("israel") || text.includes("hamas") || text.includes("guerra") || text.includes("paz")) {
+        mainTopic = "Conflitos Internacionais"
+      } else if (text.includes("g20") || text.includes("fome") || text.includes("aliança")) {
+        mainTopic = "Cooperação Internacional"
+      } else if (text.includes("saúde") || text.includes("sus") || text.includes("médico")) {
+        mainTopic = "Saúde"
+      }
+
+      return {
+        id: v._id,
+        surveyNumber: v.surveyNumber,
+        surveyName: v.surveyName,
+        questionText: v.questionText,
+        shortText: shortText,
+        theme: v.index,
+        date: v.date,
+        keywords: keywords,
+        mainTopic: mainTopic,
+        possibleAnswers: v.possibleAnswers || [],
+        hasAnswers: (v.possibleAnswers || []).length > 0,
+      }
+    })
+
+    console.log(`✅ Prévia gerada para ${previewData.length} variações da pergunta ${questionCodeDecoded}`)
+
+    res.json({
+      success: true,
+      questionCode: questionCodeDecoded,
+      theme: theme || "Todos os temas",
+      totalVariations: previewData.length,
+      variations: previewData,
+      selectionHelp: {
+        message: "Use o 'id' da variação escolhida na rota: /api/data/question/" + questionCode + "/responses/{id}",
+        alternativeMessage:
+          "Ou use surveyNumber: /api/data/question/" +
+          questionCode +
+          "/responses?theme=" +
+          (theme || "TEMA") +
+          "&surveyNumber=NUMERO",
+      },
+    })
+  } catch (error) {
+    console.error(`❌ Erro ao buscar prévia da pergunta:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// GET /api/data/question/:questionCode/smart-search - BUSCA INTELIGENTE COM SUGESTÕES
+router.get("/question/:questionCode/smart-search", async (req, res) => {
+  try {
+    const { questionCode } = req.params
+    const { theme, hint } = req.query
+
+    const questionCodeDecoded = decodeURIComponent(questionCode).toUpperCase()
+    console.log(`🧠 Busca inteligente para pergunta ${questionCodeDecoded} com hint: "${hint}"`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    const filters = { variable: questionCodeDecoded }
+    if (theme) {
+      filters.index = theme
+    }
+
+    const allVariations = await QuestionIndex.find(filters)
+      .select("_id variable questionText surveyNumber surveyName index date possibleAnswers")
+      .sort({ surveyNumber: 1 })
+      .lean()
+
+    if (allVariations.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Nenhuma variação encontrada para a pergunta '${questionCode}'${theme ? ` no tema '${theme}'` : ""}.`,
+      })
+    }
+
+    let bestMatches = allVariations
+
+    // Se foi fornecida uma dica, filtrar por relevância
+    if (hint && hint.length > 2) {
+      const hintLower = hint.toLowerCase()
+
+      bestMatches = allVariations
+        .map((variation) => {
+          const textLower = variation.questionText.toLowerCase()
+          let score = 0
+
+          // Pontuação por palavras-chave encontradas
+          const hintWords = hintLower.split(/\s+/).filter((w) => w.length > 2)
+          hintWords.forEach((word) => {
+            if (textLower.includes(word)) {
+              score += 10
+            }
+          })
+
+          // Pontuação por temas específicos
+          if (hintLower.includes("israel") && textLower.includes("israel")) score += 20
+          if (hintLower.includes("hamas") && textLower.includes("hamas")) score += 20
+          if (hintLower.includes("lula") && textLower.includes("lula")) score += 20
+          if (hintLower.includes("bolsonaro") && textLower.includes("bolsonaro")) score += 20
+          if (hintLower.includes("economia") && textLower.includes("economia")) score += 15
+          if (hintLower.includes("tarifa") && textLower.includes("tarifa")) score += 15
+          if (hintLower.includes("g20") && textLower.includes("g20")) score += 15
+          if (hintLower.includes("fome") && textLower.includes("fome")) score += 15
+
+          return { ...variation, relevanceScore: score }
+        })
+        .filter((v) => v.relevanceScore > 0)
+        .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    }
+
+    const suggestions = bestMatches.slice(0, 5).map((v, index) => {
+      const shortText = v.questionText.length > 200 ? v.questionText.substring(0, 200) + "..." : v.questionText
+
+      return {
+        id: v._id,
+        rank: index + 1,
+        surveyNumber: v.surveyNumber,
+        surveyName: v.surveyName,
+        questionText: v.questionText,
+        shortText: shortText,
+        theme: v.index,
+        date: v.date,
+        relevanceScore: v.relevanceScore || 0,
+        possibleAnswers: v.possibleAnswers || [],
+        directUrl: `/api/data/question/${questionCode}/responses/${v._id}`,
+        alternativeUrl: `/api/data/question/${questionCode}/responses?theme=${encodeURIComponent(theme || v.index)}&surveyNumber=${v.surveyNumber}`,
+      }
+    })
+
+    res.json({
+      success: true,
+      questionCode: questionCodeDecoded,
+      searchHint: hint || "Nenhuma dica fornecida",
+      theme: theme || "Todos os temas",
+      totalFound: bestMatches.length,
+      topSuggestions: suggestions,
+      usage: {
+        message: "Escolha uma das sugestões e use a 'directUrl' ou 'alternativeUrl' para buscar os dados",
+        example: suggestions.length > 0 ? suggestions[0].directUrl : "Nenhuma sugestão disponível",
+      },
+    })
+  } catch (error) {
+    console.error(`❌ Erro na busca inteligente:`, error)
     res.status(500).json({
       success: false,
       message: "Erro interno do servidor",
@@ -586,6 +1220,103 @@ router.post("/themes/questions", async (req, res) => {
     })
   } catch (error) {
     console.error(`❌ Erro ao buscar perguntas do tema:`, error)
+    res.status(500).json({
+      success: false,
+      message: "Erro interno do servidor",
+      error: error.message,
+    })
+  }
+})
+
+// POST /api/data/question/:questionCode/responses - BUSCA EXATA POR TEXTO DA PERGUNTA NO BODY
+router.post("/question/:questionCode/responses", async (req, res) => {
+  try {
+    const { questionCode } = req.params
+    const { theme, questionText, surveyNumber } = req.body
+
+    // Validações
+    if (!theme) {
+      return res.status(400).json({
+        success: false,
+        message: "Campo 'theme' é obrigatório no body da requisição",
+      })
+    }
+
+    if (!questionText) {
+      return res.status(400).json({
+        success: false,
+        message: "Campo 'questionText' é obrigatório no body da requisição",
+      })
+    }
+
+    const questionCodeDecoded = decodeURIComponent(questionCode).toUpperCase()
+
+    console.log(`⚡️ Busca POST para pergunta ${questionCodeDecoded}`)
+    console.log(`📋 Tema: ${theme}`)
+    console.log(`📋 Texto da pergunta: ${questionText.substring(0, 100)}...`)
+
+    const QuestionIndex = await getModel("QuestionIndex")
+
+    // Filtros exatos: variable + theme + questionText
+    const questionFilters = {
+      variable: questionCodeDecoded,
+      index: theme,
+      questionText: questionText.trim(), // Correspondência exata
+    }
+
+    // Filtro adicional por surveyNumber se fornecido
+    if (surveyNumber) {
+      questionFilters.surveyNumber = surveyNumber.toString()
+    }
+
+    console.log(`🔍 Filtros aplicados:`, {
+      variable: questionFilters.variable,
+      index: questionFilters.index,
+      questionTextLength: questionFilters.questionText.length,
+      surveyNumber: questionFilters.surveyNumber || "Não especificado",
+    })
+
+    const questionInfo = await QuestionIndex.findOne(questionFilters).lean()
+
+    if (!questionInfo) {
+      console.log(`❌ Pergunta não encontrada com os filtros exatos`)
+
+      // Tentar buscar variações disponíveis para ajudar o usuário
+      const availableVariations = await QuestionIndex.find({
+        variable: questionCodeDecoded,
+        index: theme,
+      })
+        .select("surveyNumber questionText")
+        .lean()
+
+      return res.status(404).json({
+        success: false,
+        message: `Pergunta '${questionCode}' não encontrada com o texto exato fornecido no tema '${theme}'.`,
+        availableVariations: availableVariations.map((v) => ({
+          surveyNumber: v.surveyNumber,
+          questionTextPreview: v.questionText.substring(0, 150) + "...",
+        })),
+        hint: "Verifique se o texto da pergunta está exatamente igual ao armazenado no banco de dados.",
+      })
+    }
+
+    console.log(`✅ Pergunta encontrada: Rodada ${questionInfo.surveyNumber}`)
+
+    // Processar a pergunta específica encontrada
+    const response = await processSpecificQuestion(questionInfo, questionCodeDecoded, theme)
+
+    // Adicionar informações extras na resposta
+    response.searchMethod = "POST com texto exato"
+    response.matchedFilters = {
+      variable: questionCodeDecoded,
+      theme: theme,
+      surveyNumber: questionInfo.surveyNumber,
+      questionTextMatched: true,
+    }
+
+    res.json(response)
+  } catch (error) {
+    console.error(`❌ Erro na busca POST para ${req.params.questionCode}:`, error)
     res.status(500).json({
       success: false,
       message: "Erro interno do servidor",
