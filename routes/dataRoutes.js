@@ -1342,7 +1342,7 @@ router.post("/question/:questionCode/responses", async (req, res) => {
 // Adicionar após as rotas existentes, antes do module.exports
 
 // GET /api/data/themes/:theme/questions-grouped
-// Agrupa perguntas de um tema pelo questionText, mostrando todas as variáveis e rodadas
+// Agrupa perguntas de um tema pelo questionText, incluindo perguntas múltiplas e sequenciais
 router.get("/themes/:theme/questions-grouped", async (req, res) => {
   try {
     const { theme } = req.params
@@ -1354,8 +1354,8 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
     const allQuestions = await QuestionIndex.find({
       index: theme,
     })
-      .select("variable questionText surveyNumber surveyName date")
-      .sort({ questionText: 1, surveyNumber: 1 })
+      .select("variable questionText label surveyNumber surveyName date")
+      .sort({ variable: 1, surveyNumber: 1 })
       .lean()
 
     if (allQuestions.length === 0) {
@@ -1365,68 +1365,167 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
       })
     }
 
-    // Agrupar por questionText
-    const groupedQuestions = new Map()
+    // Função para extrair o código base da pergunta
+    const getBaseQuestionCode = (variable) => {
+      // Remove sufixos como #01, #02 ou _1, _2
+      return variable.replace(/#\d+$/, '').replace(/_\d+$/, '')
+    }
 
+    // Função para verificar se é uma pergunta múltipla
+    const isMultipleQuestion = (variable) => {
+      return variable.includes('#') || /_\d+$/.test(variable)
+    }
+
+    // Primeiro, agrupar por questionText idêntico
+    const textGroups = new Map()
+    
     for (const question of allQuestions) {
       const key = question.questionText.trim()
+      
+      if (!textGroups.has(key)) {
+        textGroups.set(key, [])
+      }
+      
+      textGroups.get(key).push(question)
+    }
 
-      if (!groupedQuestions.has(key)) {
-        groupedQuestions.set(key, {
-          questionText: question.questionText,
-          theme: theme,
-          variables: new Set(),
-          rounds: new Set(),
-          variations: [],
-          totalVariations: 0,
+    // Agora, processar cada grupo para identificar perguntas múltiplas
+    const finalGroups = []
+    const processedVariables = new Set()
+
+    // Processar perguntas múltiplas primeiro
+    for (const question of allQuestions) {
+      if (processedVariables.has(question.variable)) continue
+
+      const baseCode = getBaseQuestionCode(question.variable)
+      
+      if (isMultipleQuestion(question.variable)) {
+        // Buscar todas as perguntas relacionadas com o mesmo código base
+        const relatedQuestions = allQuestions.filter(q => {
+          const qBaseCode = getBaseQuestionCode(q.variable)
+          return qBaseCode === baseCode && 
+                 q.surveyNumber === question.surveyNumber &&
+                 !processedVariables.has(q.variable)
+        })
+
+        if (relatedQuestions.length > 1) {
+          // É uma pergunta múltipla genuína
+          const group = {
+            id: `${theme}-multiple-${baseCode}-${question.surveyNumber}`,
+            type: 'multiple',
+            baseCode: baseCode,
+            questionText: question.questionText,
+            theme: theme,
+            surveyNumber: question.surveyNumber,
+            surveyName: question.surveyName,
+            date: question.date,
+            subQuestions: relatedQuestions.map(q => ({
+              variable: q.variable,
+              label: q.label || '',
+              questionText: q.questionText,
+              order: parseInt(q.variable.match(/#(\d+)$|_(\d+)$/)?.[1] || q.variable.match(/#(\d+)$|_(\d+)$/)?.[2] || '0')
+            })).sort((a, b) => a.order - b.order),
+            variables: relatedQuestions.map(q => q.variable),
+            totalSubQuestions: relatedQuestions.length
+          }
+
+          finalGroups.push(group)
+          relatedQuestions.forEach(q => processedVariables.add(q.variable))
+        }
+      }
+    }
+
+    // Agora processar as perguntas agrupadas por texto
+    let groupIndex = 0
+    for (const [questionText, questions] of textGroups.entries()) {
+      // Filtrar perguntas já processadas
+      const unprocessedQuestions = questions.filter(q => !processedVariables.has(q.variable))
+      
+      if (unprocessedQuestions.length === 0) continue
+
+      const variables = new Set()
+      const rounds = new Set()
+      const variations = []
+
+      for (const question of unprocessedQuestions) {
+        variables.add(question.variable)
+        rounds.add(question.surveyNumber)
+        variations.push({
+          variable: question.variable,
+          surveyNumber: question.surveyNumber,
+          surveyName: question.surveyName,
+          date: question.date,
+          label: question.label || ''
         })
       }
 
-      const group = groupedQuestions.get(key)
-      group.variables.add(question.variable)
-      group.rounds.add(question.surveyNumber)
-      group.variations.push({
-        variable: question.variable,
-        surveyNumber: question.surveyNumber,
-        surveyName: question.surveyName,
-        date: question.date,
-      })
-      group.totalVariations++
+      const group = {
+        id: `${theme}-text-${groupIndex++}`,
+        type: 'text-grouped',
+        questionText: questionText,
+        shortText: questionText.length > 200 ? questionText.substring(0, 200) + "..." : questionText,
+        theme: theme,
+        variables: Array.from(variables).sort(),
+        rounds: Array.from(rounds).sort((a, b) => Number.parseInt(a) - Number.parseInt(b)),
+        totalVariations: unprocessedQuestions.length,
+        variations: variations.sort((a, b) => Number.parseInt(a.surveyNumber) - Number.parseInt(b.surveyNumber)),
+        // Dados para usar no POST endpoint
+        searchData: {
+          theme: theme,
+          questionText: questionText
+        }
+      }
+
+      finalGroups.push(group)
+      unprocessedQuestions.forEach(q => processedVariables.add(q.variable))
     }
 
-    // Converter para array e formatar
-    const result = Array.from(groupedQuestions.values()).map((group, index) => ({
-      id: `${theme}-question-${index + 1}`,
-      questionText: group.questionText,
-      shortText: group.questionText.length > 200 ? group.questionText.substring(0, 200) + "..." : group.questionText,
-      theme: group.theme,
-      variables: Array.from(group.variables).sort(),
-      rounds: Array.from(group.rounds).sort((a, b) => Number.parseInt(a) - Number.parseInt(b)),
-      totalVariations: group.totalVariations,
-      variations: group.variations.sort((a, b) => Number.parseInt(a.surveyNumber) - Number.parseInt(b.surveyNumber)),
-      // Dados para usar no POST endpoint
-      searchData: {
-        theme: group.theme,
-        questionText: group.questionText,
-      },
-    }))
+    // Ordenar os grupos finais
+    finalGroups.sort((a, b) => {
+      // Primeiro por tipo (múltiplas primeiro)
+      if (a.type !== b.type) {
+        return a.type === 'multiple' ? -1 : 1
+      }
+      // Depois por código base ou texto
+      if (a.type === 'multiple') {
+        return a.baseCode.localeCompare(b.baseCode)
+      }
+      return a.questionText.localeCompare(b.questionText)
+    })
 
-    console.log(`✅ Encontrados ${result.length} grupos de perguntas para o tema '${theme}'`)
+    console.log(`✅ Encontrados ${finalGroups.length} grupos de perguntas para o tema '${theme}'`)
+
+    // Estatísticas
+    const multipleQuestions = finalGroups.filter(g => g.type === 'multiple')
+    const textGroupedQuestions = finalGroups.filter(g => g.type === 'text-grouped')
 
     res.json({
       success: true,
       theme: theme,
-      totalGroups: result.length,
-      totalQuestions: allQuestions.length,
-      questionGroups: result,
+      statistics: {
+        totalGroups: finalGroups.length,
+        multipleQuestions: multipleQuestions.length,
+        textGroupedQuestions: textGroupedQuestions.length,
+        totalQuestionsProcessed: processedVariables.size,
+        totalQuestionsInTheme: allQuestions.length
+      },
+      questionGroups: finalGroups,
       usage: {
         message: "Use os dados em 'searchData' para buscar o histórico completo da pergunta",
         endpoint: "POST /api/data/question/grouped/responses",
+        multipleQuestionsNote: "Para perguntas múltiplas, você pode buscar todas as subperguntas de uma vez usando o array 'variables'",
         example: {
-          theme: theme,
-          questionText: result.length > 0 ? result[0].questionText : "Exemplo de texto da pergunta",
-        },
-      },
+          textGrouped: textGroupedQuestions.length > 0 ? {
+            theme: theme,
+            questionText: textGroupedQuestions[0].questionText
+          } : null,
+          multiple: multipleQuestions.length > 0 ? {
+            theme: theme,
+            variables: multipleQuestions[0].variables,
+            baseCode: multipleQuestions[0].baseCode
+          } : null
+        }
+      }
     })
   } catch (error) {
     console.error(`❌ Erro ao agrupar perguntas do tema:`, error)
@@ -1439,10 +1538,10 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
 })
 
 // POST /api/data/question/grouped/responses
-// Busca histórico completo de uma pergunta agrupada por questionText + theme
+// Busca histórico completo de perguntas agrupadas, incluindo suporte para perguntas múltiplas
 router.post("/question/grouped/responses", async (req, res) => {
   try {
-    const { theme, questionText } = req.body
+    const { theme, questionText, variables, baseCode } = req.body
 
     // Validações
     if (!theme) {
@@ -1452,28 +1551,45 @@ router.post("/question/grouped/responses", async (req, res) => {
       })
     }
 
-    if (!questionText) {
+    // Deve ter questionText OU variables
+    if (!questionText && (!variables || variables.length === 0)) {
       return res.status(400).json({
         success: false,
-        message: "Campo 'questionText' é obrigatório no body da requisição",
+        message: "É necessário fornecer 'questionText' ou 'variables' no body da requisição",
       })
     }
 
-    console.log(`⚡️ Busca agrupada para pergunta no tema: ${theme}`)
-    console.log(`📋 Texto da pergunta: ${questionText.substring(0, 100)}...`)
-
     const QuestionIndex = await getModel("QuestionIndex")
+    let identicalQuestions = []
+    let searchType = ''
 
-    // Buscar TODAS as perguntas com o mesmo questionText e theme
-    const identicalQuestions = await QuestionIndex.find({
-      index: theme,
-      questionText: questionText.trim(),
-    }).lean()
+    // Se foram fornecidas variáveis específicas (caso de perguntas múltiplas)
+    if (variables && variables.length > 0) {
+      console.log(`⚡️ Busca por perguntas múltiplas: ${variables.join(', ')} no tema: ${theme}`)
+      searchType = 'multiple'
+      
+      identicalQuestions = await QuestionIndex.find({
+        index: theme,
+        variable: { $in: variables }
+      }).lean()
+
+    } else if (questionText) {
+      console.log(`⚡️ Busca agrupada para pergunta no tema: ${theme}`)
+      console.log(`📋 Texto da pergunta: ${questionText.substring(0, 100)}...`)
+      searchType = 'text'
+
+      identicalQuestions = await QuestionIndex.find({
+        index: theme,
+        questionText: questionText.trim(),
+      }).lean()
+    }
 
     if (identicalQuestions.length === 0) {
       return res.status(404).json({
         success: false,
-        message: `Nenhuma pergunta encontrada com o texto fornecido no tema '${theme}'.`,
+        message: searchType === 'multiple' 
+          ? `Nenhuma pergunta encontrada com as variáveis fornecidas no tema '${theme}'.`
+          : `Nenhuma pergunta encontrada com o texto fornecido no tema '${theme}'.`,
       })
     }
 
@@ -1483,7 +1599,8 @@ router.post("/question/grouped/responses", async (req, res) => {
     const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
     const surveyNumbers = identicalQuestions.map((q) => q.surveyNumber)
     const variablesByRound = identicalQuestions.reduce((acc, q) => {
-      acc[q.surveyNumber] = q.variable
+      if (!acc[q.surveyNumber]) acc[q.surveyNumber] = []
+      acc[q.surveyNumber].push(q.variable)
       return acc
     }, {})
 
@@ -1525,17 +1642,12 @@ router.post("/question/grouped/responses", async (req, res) => {
             _id: 0,
             year: 1,
             rodada: 1,
-            mainAnswer: {
-              $let: {
-                vars: { ans: { $filter: { input: "$answers", cond: { $in: ["$$this.k", questionCodes] } } } },
-                in: { $arrayElemAt: ["$$ans.v", 0] },
-              },
-            },
-            questionVariable: {
-              $let: {
-                vars: { ans: { $filter: { input: "$answers", cond: { $in: ["$$this.k", questionCodes] } } } },
-                in: { $arrayElemAt: ["$$ans.k", 0] },
-              },
+            // Para perguntas múltiplas, precisamos capturar todas as respostas relevantes
+            answers: {
+              $filter: {
+                input: "$answers",
+                cond: { $in: ["$$this.k", questionCodes] }
+              }
             },
             weight: {
               $let: {
@@ -1571,7 +1683,7 @@ router.post("/question/grouped/responses", async (req, res) => {
             },
           },
         },
-        { $match: { mainAnswer: { $exists: true, $ne: null, $ne: "" } } },
+        { $match: { answers: { $ne: [] } } },
       ]
 
       const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 120000 })
@@ -1584,7 +1696,10 @@ router.post("/question/grouped/responses", async (req, res) => {
       return res.json({
         success: true,
         theme: theme,
-        questionText: questionText,
+        searchType: searchType,
+        questionText: questionText || null,
+        variables: variables || null,
+        baseCode: baseCode || null,
         questionInfo: {
           variables: questionCodes,
           rounds: surveyNumbers,
@@ -1596,7 +1711,7 @@ router.post("/question/grouped/responses", async (req, res) => {
       })
     }
 
-    // Processar dados agrupados
+    // Processar dados - adaptado para perguntas múltiplas
     const processedData = new Map()
 
     for (const doc of rawData) {
@@ -1606,72 +1721,149 @@ router.post("/question/grouped/responses", async (req, res) => {
           year: doc.year,
           rodada: doc.rodada,
           period: roundKey,
-          variable: variablesByRound[doc.rodada.toString()] || doc.questionVariable,
+          variables: variablesByRound[doc.rodada.toString()] || [],
           totalResponses: 0,
           totalWeightedResponses: 0,
-          distribution: new Map(),
+          distribution: searchType === 'multiple' ? {} : new Map(),
         })
       }
       const roundData = processedData.get(roundKey)
       roundData.totalResponses += 1
       roundData.totalWeightedResponses += doc.weight
 
-      if (!roundData.distribution.has(doc.mainAnswer)) {
-        roundData.distribution.set(doc.mainAnswer, {
-          response: doc.mainAnswer,
-          count: 0,
-          weightedCount: 0,
-          demographics: {},
-        })
-      }
-      const answerData = roundData.distribution.get(doc.mainAnswer)
-      answerData.count += 1
-      answerData.weightedCount += doc.weight
+      // Para perguntas múltiplas, processar cada resposta separadamente
+      if (searchType === 'multiple') {
+        for (const answer of doc.answers) {
+          const variable = answer.k
+          const value = answer.v
 
-      for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
-        if (demoValue && demoValue !== "") {
-          if (!answerData.demographics[demoField]) {
-            answerData.demographics[demoField] = new Map()
+          if (!roundData.distribution[variable]) {
+            roundData.distribution[variable] = new Map()
           }
-          const demoFieldMap = answerData.demographics[demoField]
-          if (!demoFieldMap.has(demoValue)) {
-            demoFieldMap.set(demoValue, { response: demoValue, count: 0, weightedCount: 0 })
+
+          if (!roundData.distribution[variable].has(value)) {
+            roundData.distribution[variable].set(value, {
+              response: value,
+              count: 0,
+              weightedCount: 0,
+              demographics: {},
+            })
           }
-          const demoValueData = demoFieldMap.get(demoValue)
-          demoValueData.count += 1
-          demoValueData.weightedCount += doc.weight
+
+          const answerData = roundData.distribution[variable].get(value)
+          answerData.count += 1
+          answerData.weightedCount += doc.weight
+
+          // Processar demographics
+          for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
+            if (demoValue && demoValue !== "") {
+              if (!answerData.demographics[demoField]) {
+                answerData.demographics[demoField] = new Map()
+              }
+              const demoFieldMap = answerData.demographics[demoField]
+              if (!demoFieldMap.has(demoValue)) {
+                demoFieldMap.set(demoValue, { response: demoValue, count: 0, weightedCount: 0 })
+              }
+              const demoValueData = demoFieldMap.get(demoValue)
+              demoValueData.count += 1
+              demoValueData.weightedCount += doc.weight
+            }
+          }
+        }
+      } else {
+        // Processamento padrão para perguntas agrupadas por texto
+        const mainAnswer = doc.answers[0]?.v
+        if (!mainAnswer) continue
+
+        if (!roundData.distribution.has(mainAnswer)) {
+          roundData.distribution.set(mainAnswer, {
+            response: mainAnswer,
+            count: 0,
+            weightedCount: 0,
+            demographics: {},
+          })
+        }
+        const answerData = roundData.distribution.get(mainAnswer)
+        answerData.count += 1
+        answerData.weightedCount += doc.weight
+
+        for (const [demoField, demoValue] of Object.entries(doc.demographics)) {
+          if (demoValue && demoValue !== "") {
+            if (!answerData.demographics[demoField]) {
+              answerData.demographics[demoField] = new Map()
+            }
+            const demoFieldMap = answerData.demographics[demoField]
+            if (!demoFieldMap.has(demoValue)) {
+              demoFieldMap.set(demoValue, { response: demoValue, count: 0, weightedCount: 0 })
+            }
+            const demoValueData = demoFieldMap.get(demoValue)
+            demoValueData.count += 1
+            demoValueData.weightedCount += doc.weight
+          }
         }
       }
     }
 
+    // Finalizar processamento
     const finalHistoricalData = Array.from(processedData.values())
       .map((round) => {
-        round.distribution = Array.from(round.distribution.values())
-          .map((answer) => {
-            answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
-            Object.keys(answer.demographics).forEach((demoField) => {
-              answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
-                .map((d) => ({ ...d, weightedCount: Math.round(d.weightedCount * 100) / 100 }))
-                .sort((a, b) => b.weightedCount - a.weightedCount)
+        if (searchType === 'multiple') {
+          // Para perguntas múltiplas, converter cada Map em array
+          const distributionByVariable = {}
+          for (const [variable, distribution] of Object.entries(round.distribution)) {
+            distributionByVariable[variable] = Array.from(distribution.values())
+              .map((answer) => {
+                answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
+                Object.keys(answer.demographics).forEach((demoField) => {
+                  answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
+                    .map((d) => ({ ...d, weightedCount: Math.round(d.weightedCount * 100) / 100 }))
+                    .sort((a, b) => b.weightedCount - a.weightedCount)
+                })
+                return answer
+              })
+              .sort((a, b) => b.weightedCount - a.weightedCount)
+          }
+          round.distribution = distributionByVariable
+        } else {
+          round.distribution = Array.from(round.distribution.values())
+            .map((answer) => {
+              answer.weightedCount = Math.round(answer.weightedCount * 100) / 100
+              Object.keys(answer.demographics).forEach((demoField) => {
+                answer.demographics[demoField] = Array.from(answer.demographics[demoField].values())
+                  .map((d) => ({ ...d, weightedCount: Math.round(d.weightedCount * 100) / 100 }))
+                  .sort((a, b) => b.weightedCount - a.weightedCount)
+              })
+              return answer
             })
-            return answer
-          })
-          .sort((a, b) => b.weightedCount - a.weightedCount)
+            .sort((a, b) => b.weightedCount - a.weightedCount)
+        }
         round.totalWeightedResponses = Math.round(round.totalWeightedResponses * 100) / 100
         return round
       })
       .sort((a, b) => b.year - a.year || b.rodada - a.rodada)
 
+    // Adicionar informações sobre labels para perguntas múltiplas
+    let labelsInfo = null
+    if (searchType === 'multiple') {
+      labelsInfo = identicalQuestions.reduce((acc, q) => {
+        acc[q.variable] = q.label || q.questionText
+        return acc
+      }, {})
+    }
+
     const response = {
       success: true,
-      searchMethod: "Agrupado por questionText + theme",
+      searchMethod: searchType === 'multiple' ? "Perguntas múltiplas" : "Agrupado por questionText + theme",
+      searchType: searchType,
       theme: theme,
-      questionText: questionText,
+      questionText: questionText || null,
+      baseCode: baseCode || null,
       questionInfo: {
         variables: questionCodes,
         rounds: surveyNumbers,
         totalVariations: identicalQuestions.length,
         variablesByRound: variablesByRound,
+        labels: labelsInfo
       },
       historicalData: finalHistoricalData,
       demographicFields: demographicFields,
