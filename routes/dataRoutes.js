@@ -32,6 +32,7 @@ router.get("/themes", async (req, res) => {
         $group: {
           _id: "$index",
           questionCount: { $sum: 1 },
+          Rodadas: { $addToSet: "$surveyNumber" }, // Agrupa todas as rodadas únicas
         },
       },
       {
@@ -39,6 +40,19 @@ router.get("/themes", async (req, res) => {
           _id: 0,
           theme: "$_id",
           questionCount: 1,
+          Rodadas: {
+            $map: {
+              input: "$Rodadas",
+              as: "r",
+              in: {
+                $cond: {
+                  if: { $eq: [{ $type: "$$r" }, "string"] },
+                  then: { $toInt: "$$r" }, // Converte strings numéricas em inteiros
+                  else: "$$r",
+                },
+              },
+            },
+          },
         },
       },
       {
