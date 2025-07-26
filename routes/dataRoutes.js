@@ -1776,6 +1776,7 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
               order: parseInt(q.variable.match(/#(\d+)$|_(\d+)$/)?.[1] || q.variable.match(/#(\d+)$|_(\d+)$/)?.[2] || '0')
             })).sort((a, b) => a.order - b.order),
             variables: relatedQuestions.map(q => q.variable),
+            rounds: [question.surveyNumber], // Rodadas específicas para múltiplas
             totalSubQuestions: relatedQuestions.length
           }
 
@@ -1809,6 +1810,9 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
         })
       }
 
+      // Converter rounds em array ordenado de strings para manter compatibilidade
+      const roundsArray = Array.from(rounds).sort((a, b) => Number.parseInt(a) - Number.parseInt(b))
+
       const group = {
         id: `${theme}-text-${groupIndex++}`,
         type: 'text-grouped',
@@ -1816,7 +1820,7 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
         shortText: questionText.length > 200 ? questionText.substring(0, 200) + "..." : questionText,
         theme: theme,
         variables: Array.from(variables).sort(),
-        rounds: Array.from(rounds).sort((a, b) => Number.parseInt(a) - Number.parseInt(b)),
+        rounds: roundsArray, // Array com as rodadas específicas onde a pergunta aparece
         totalVariations: unprocessedQuestions.length,
         variations: variations.sort((a, b) => Number.parseInt(a.surveyNumber) - Number.parseInt(b.surveyNumber)),
         // Dados para usar no POST endpoint
