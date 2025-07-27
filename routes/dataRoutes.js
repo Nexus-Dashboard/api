@@ -206,6 +206,7 @@ router.get("/themes/:themeSlug/questions", async (req, res) => {
   }
 })
 
+
 // POST /api/data/question/grouped/responses
 // Busca histórico completo de perguntas agrupadas, incluindo suporte para perguntas múltiplas
 router.post("/question/grouped/responses", async (req, res) => {
@@ -230,51 +231,99 @@ router.post("/question/grouped/responses", async (req, res) => {
 
     const QuestionIndex = await getModel("QuestionIndex")
     let identicalQuestions = []
-    let searchType = ''
+    let searchType = ""
 
     // Se foram fornecidas variáveis específicas (caso de perguntas múltiplas)
     if (variables && variables.length > 0) {
-      console.log(`⚡️ Busca por perguntas múltiplas: ${variables.join(', ')} no tema: ${theme}`)
-      searchType = 'multiple'
-      
+      console.log(`⚡️ Busca por perguntas múltiplas: ${variables.join(", ")} no tema: ${theme}`)
+      searchType = "multiple"
+
       identicalQuestions = await QuestionIndex.find({
         index: theme,
-        variable: { $in: variables }
+        variable: { $in: variables },
       }).lean()
-
     } else if (questionText) {
       console.log(`⚡️ Busca agrupada para pergunta no tema: ${theme}`)
       console.log(`📋 Texto da pergunta: ${questionText.substring(0, 100)}...`)
-      searchType = 'text'
+      searchType = "text"
 
+      // Busca EXATA por texto da pergunta
+      const exactQuestionText = questionText.trim()
       identicalQuestions = await QuestionIndex.find({
         index: theme,
-        questionText: questionText.trim(),
+        questionText: { $eq: exactQuestionText }, // Usar $eq para correspondência exata
       }).lean()
+
+      // Log para debug
+      console.log(`🔍 Buscando por texto EXATO: "${exactQuestionText}"`)
+      console.log(`📊 Perguntas encontradas: ${identicalQuestions.length}`)
+
+      // Verificar se realmente encontrou perguntas com texto idêntico
+      if (identicalQuestions.length > 0) {
+        const uniqueTexts = [...new Set(identicalQuestions.map((q) => q.questionText))]
+        console.log(`📝 Textos únicos encontrados: ${uniqueTexts.length}`)
+        if (uniqueTexts.length > 1) {
+          console.warn(`⚠️ AVISO: Encontrados ${uniqueTexts.length} textos diferentes quando deveria ser apenas 1`)
+          uniqueTexts.forEach((text, index) => {
+            console.log(`   ${index + 1}: "${text.substring(0, 100)}..."`)
+          })
+        }
+      }
     }
 
     if (identicalQuestions.length === 0) {
       return res.status(404).json({
         success: false,
-        message: searchType === 'multiple' 
-          ? `Nenhuma pergunta encontrada com as variáveis fornecidas no tema '${theme}'.`
-          : `Nenhuma pergunta encontrada com o texto fornecido no tema '${theme}'.`,
+        message:
+          searchType === "multiple"
+            ? `Nenhuma pergunta encontrada com as variáveis fornecidas no tema '${theme}'.`
+            : `Nenhuma pergunta encontrada com o texto EXATO fornecido no tema '${theme}'.`,
+        searchDetails: {
+          theme: theme,
+          searchType: searchType,
+          questionText: searchType === "text" ? questionText.substring(0, 200) + "..." : null,
+          variables: searchType === "multiple" ? variables : null,
+        },
       })
+    }
+
+    // Validação adicional para busca por texto
+    if (searchType === "text") {
+      const uniqueQuestionTexts = [...new Set(identicalQuestions.map((q) => q.questionText))]
+      if (uniqueQuestionTexts.length > 1) {
+        console.error(`❌ ERRO: Encontrados ${uniqueQuestionTexts.length} textos diferentes na busca por texto exato`)
+        return res.status(400).json({
+          success: false,
+          message: `Erro interno: busca por texto exato retornou ${uniqueQuestionTexts.length} textos diferentes`,
+          foundTexts: uniqueQuestionTexts.map((text) => text.substring(0, 100) + "..."),
+        })
+      }
     }
 
     console.log(`✅ Encontradas ${identicalQuestions.length} variações da pergunta`)
 
-    // Extrair todas as variáveis e rodadas
-    const questionCodes = identicalQuestions.map((q) => q.variable.toUpperCase())
-    const surveyNumbers = identicalQuestions.map((q) => q.surveyNumber)
+    // Extrair todas as variáveis e rodadas - CORREÇÃO AQUI
+    const questionCodes = [...new Set(identicalQuestions.map((q) => q.variable.toUpperCase()))] // Remove duplicatas
+    const surveyNumbers = [...new Set(identicalQuestions.map((q) => q.surveyNumber))] // Remove duplicatas
     const variablesByRound = identicalQuestions.reduce((acc, q) => {
       if (!acc[q.surveyNumber]) acc[q.surveyNumber] = []
-      acc[q.surveyNumber].push(q.variable)
+      if (!acc[q.surveyNumber].includes(q.variable)) {
+        acc[q.surveyNumber].push(q.variable)
+      }
       return acc
     }, {})
 
-    console.log(`📋 Variáveis encontradas: ${questionCodes.join(", ")}`)
+    // CORREÇÃO PRINCIPAL: Criar filtro mais específico baseado nas combinações exatas rodada+variable
+    const validCombinations = identicalQuestions.map(q => ({
+      variable: q.variable.toUpperCase(),
+      rodada: Number.parseInt(q.surveyNumber),
+      questionText: q.questionText
+    }));
+
+    console.log(`📋 Variáveis únicas encontradas: ${questionCodes.join(", ")}`)
     console.log(`📋 Rodadas correspondentes: ${surveyNumbers.join(", ")}`)
+    console.log(`📋 Total de rodadas válidas: ${surveyNumbers.length}`)
+    console.log(`📋 Combinações válidas rodada+variable: ${validCombinations.length}`)
 
     const responseModels = await getAllModels("Response")
     const rawData = []
@@ -295,71 +344,87 @@ router.post("/question/grouped/responses", async (req, res) => {
       "PF10",
     ]
 
-    // Buscar dados de todas as rodadas
+    // CORREÇÃO: Buscar dados APENAS das combinações específicas que têm o texto exato
     for (const Response of responseModels) {
       console.log(`🔍 Processando banco: ${Response.db.name}`)
 
-      const pipeline = [
-        {
-          $match: {
-            "answers.k": { $in: questionCodes },
-            rodada: { $in: surveyNumbers.map((s) => Number.parseInt(s)) },
-          },
-        },
-        {
-          $project: {
-            _id: 0,
-            year: 1,
-            rodada: 1,
-            // Para perguntas múltiplas, precisamos capturar todas as respostas relevantes
-            answers: {
-              $filter: {
-                input: "$answers",
-                cond: { $in: ["$$this.k", questionCodes] }
-              }
+      // Buscar dados apenas para as combinações válidas
+      for (const combo of validCombinations) {
+        const pipeline = [
+          {
+            $match: {
+              "answers.k": combo.variable,
+              "rodada": combo.rodada
             },
-            weight: {
-              $let: {
-                vars: {
-                  weightAns: {
-                    $filter: { input: "$answers", cond: { $regexMatch: { input: "$$this.k", regex: /weights/i } } },
-                  },
+          },
+          {
+            $project: {
+              _id: 0,
+              year: 1,
+              rodada: 1,
+              // Para perguntas múltiplas, precisamos capturar todas as respostas relevantes
+              answers: {
+                $filter: {
+                  input: "$answers",
+                  cond: { $eq: ["$$this.k", combo.variable] },
                 },
-                in: {
-                  $ifNull: [
-                    {
-                      $toDouble: {
-                        $replaceAll: {
-                          input: { $toString: { $arrayElemAt: ["$$weightAns.v", 0] } },
-                          find: ",",
-                          replacement: ".",
+              },
+              weight: {
+                $let: {
+                  vars: {
+                    weightAns: {
+                      $filter: { input: "$answers", cond: { $regexMatch: { input: "$$this.k", regex: /weights/i } } },
+                    },
+                  },
+                  in: {
+                    $ifNull: [
+                      {
+                        $toDouble: {
+                          $replaceAll: {
+                            input: { $toString: { $arrayElemAt: ["$$weightAns.v", 0] } },
+                            find: ",",
+                            replacement: ".",
+                          },
                         },
                       },
-                    },
-                    1.0,
-                  ],
+                      1.0,
+                    ],
+                  },
                 },
               },
-            },
-            demographics: {
-              $arrayToObject: {
-                $map: {
-                  input: { $filter: { input: "$answers", cond: { $in: ["$$this.k", demographicFields] } } },
-                  as: "item",
-                  in: { k: "$$item.k", v: "$$item.v" },
+              demographics: {
+                $arrayToObject: {
+                  $map: {
+                    input: { $filter: { input: "$answers", cond: { $in: ["$$this.k", demographicFields] } } },
+                    as: "item",
+                    in: { k: "$$item.k", v: "$$item.v" },
+                  },
                 },
               },
             },
           },
-        },
-        { $match: { answers: { $ne: [] } } },
-      ]
+          { $match: { answers: { $ne: [] } } },
+        ]
 
-      const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 120000 })
-      rawData.push(...results)
+        const results = await Response.aggregate(pipeline, { allowDiskUse: true, maxTimeMS: 30000 })
+        rawData.push(...results)
+      }
+      
+      console.log(`📊 Total registros coletados até agora: ${rawData.length}`)
     }
 
     console.log(`📊 Total de registros brutos coletados: ${rawData.length}`)
+    
+    // Verificar se temos dados apenas das rodadas corretas
+    const foundRounds = [...new Set(rawData.map(doc => doc.rodada.toString()))]
+    console.log(`📊 Rodadas encontradas nos dados: ${foundRounds.join(", ")}`)
+    console.log(`📊 Rodadas esperadas: ${surveyNumbers.join(", ")}`)
+    
+    // Verificar se há rodadas extras (não deveria haver mais com a correção)
+    const extraRounds = foundRounds.filter(round => !surveyNumbers.includes(round))
+    if (extraRounds.length > 0) {
+      console.warn(`⚠️ AVISO: Ainda encontradas rodadas extras: ${extraRounds.join(", ")} - isso não deveria acontecer`)
+    }
 
     if (rawData.length === 0) {
       return res.json({
@@ -393,7 +458,7 @@ router.post("/question/grouped/responses", async (req, res) => {
           variables: variablesByRound[doc.rodada.toString()] || [],
           totalResponses: 0,
           totalWeightedResponses: 0,
-          distribution: searchType === 'multiple' ? {} : new Map(),
+          distribution: searchType === "multiple" ? {} : new Map(),
         })
       }
       const roundData = processedData.get(roundKey)
@@ -401,7 +466,7 @@ router.post("/question/grouped/responses", async (req, res) => {
       roundData.totalWeightedResponses += doc.weight
 
       // Para perguntas múltiplas, processar cada resposta separadamente
-      if (searchType === 'multiple') {
+      if (searchType === "multiple") {
         for (const answer of doc.answers) {
           const variable = answer.k
           const value = answer.v
@@ -476,7 +541,7 @@ router.post("/question/grouped/responses", async (req, res) => {
     // Finalizar processamento
     const finalHistoricalData = Array.from(processedData.values())
       .map((round) => {
-        if (searchType === 'multiple') {
+        if (searchType === "multiple") {
           // Para perguntas múltiplas, converter cada Map em array
           const distributionByVariable = {}
           for (const [variable, distribution] of Object.entries(round.distribution)) {
@@ -513,7 +578,7 @@ router.post("/question/grouped/responses", async (req, res) => {
 
     // Adicionar informações sobre labels para perguntas múltiplas
     let labelsInfo = null
-    if (searchType === 'multiple') {
+    if (searchType === "multiple") {
       labelsInfo = identicalQuestions.reduce((acc, q) => {
         acc[q.variable] = q.label || q.questionText
         return acc
@@ -522,7 +587,7 @@ router.post("/question/grouped/responses", async (req, res) => {
 
     const response = {
       success: true,
-      searchMethod: searchType === 'multiple' ? "Perguntas múltiplas" : "Agrupado por questionText + theme",
+      searchMethod: searchType === "multiple" ? "Perguntas múltiplas" : "Agrupado por questionText + theme",
       searchType: searchType,
       theme: theme,
       questionText: questionText || null,
@@ -532,7 +597,7 @@ router.post("/question/grouped/responses", async (req, res) => {
         rounds: surveyNumbers,
         totalVariations: identicalQuestions.length,
         variablesByRound: variablesByRound,
-        labels: labelsInfo
+        labels: labelsInfo,
       },
       historicalData: finalHistoricalData,
       demographicFields: demographicFields,
@@ -1522,6 +1587,8 @@ router.get("/search/questions", async (req, res) => {
         { variable: { $regex: q, $options: "i" } },
         { questionText: { $regex: q, $options: "i" } },
         { label: { $regex: q, $options: "i" } },
+        { label: { $regex: q, $options: "i" } },
+        { label: { $regex: q, $options: "i" } },
         { index: { $regex: q, $options: "i" } },
       ],
     })
@@ -1718,24 +1785,24 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
     // Função para extrair o código base da pergunta
     const getBaseQuestionCode = (variable) => {
       // Remove sufixos como #01, #02 ou _1, _2
-      return variable.replace(/#\d+$/, '').replace(/_\d+$/, '')
+      return variable.replace(/#\d+$/, "").replace(/_\d+$/, "")
     }
 
     // Função para verificar se é uma pergunta múltipla
     const isMultipleQuestion = (variable) => {
-      return variable.includes('#') || /_\d+$/.test(variable)
+      return variable.includes("#") || /_\d+$/.test(variable)
     }
 
     // Primeiro, agrupar por questionText idêntico
     const textGroups = new Map()
-    
+
     for (const question of allQuestions) {
       const key = question.questionText.trim()
-      
+
       if (!textGroups.has(key)) {
         textGroups.set(key, [])
       }
-      
+
       textGroups.get(key).push(question)
     }
 
@@ -1748,40 +1815,44 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
       if (processedVariables.has(question.variable)) continue
 
       const baseCode = getBaseQuestionCode(question.variable)
-      
+
       if (isMultipleQuestion(question.variable)) {
         // Buscar todas as perguntas relacionadas com o mesmo código base
-        const relatedQuestions = allQuestions.filter(q => {
+        const relatedQuestions = allQuestions.filter((q) => {
           const qBaseCode = getBaseQuestionCode(q.variable)
-          return qBaseCode === baseCode && 
-                 q.surveyNumber === question.surveyNumber &&
-                 !processedVariables.has(q.variable)
+          return (
+            qBaseCode === baseCode && q.surveyNumber === question.surveyNumber && !processedVariables.has(q.variable)
+          )
         })
 
         if (relatedQuestions.length > 1) {
           // É uma pergunta múltipla genuína
           const group = {
             id: `${theme}-multiple-${baseCode}-${question.surveyNumber}`,
-            type: 'multiple',
+            type: "multiple",
             baseCode: baseCode,
             questionText: question.questionText,
             theme: theme,
             surveyNumber: question.surveyNumber,
             surveyName: question.surveyName,
             date: question.date,
-            subQuestions: relatedQuestions.map(q => ({
-              variable: q.variable,
-              label: q.label || '',
-              questionText: q.questionText,
-              order: parseInt(q.variable.match(/#(\d+)$|_(\d+)$/)?.[1] || q.variable.match(/#(\d+)$|_(\d+)$/)?.[2] || '0')
-            })).sort((a, b) => a.order - b.order),
-            variables: relatedQuestions.map(q => q.variable),
+            subQuestions: relatedQuestions
+              .map((q) => ({
+                variable: q.variable,
+                label: q.label || "",
+                questionText: q.questionText,
+                order: Number.parseInt(
+                  q.variable.match(/#(\d+)$|_(\d+)$/)?.[1] || q.variable.match(/#(\d+)$|_(\d+)$/)?.[2] || "0",
+                ),
+              }))
+              .sort((a, b) => a.order - b.order),
+            variables: relatedQuestions.map((q) => q.variable),
             rounds: [question.surveyNumber], // Rodadas específicas para múltiplas
-            totalSubQuestions: relatedQuestions.length
+            totalSubQuestions: relatedQuestions.length,
           }
 
           finalGroups.push(group)
-          relatedQuestions.forEach(q => processedVariables.add(q.variable))
+          relatedQuestions.forEach((q) => processedVariables.add(q.variable))
         }
       }
     }
@@ -1790,8 +1861,8 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
     let groupIndex = 0
     for (const [questionText, questions] of textGroups.entries()) {
       // Filtrar perguntas já processadas
-      const unprocessedQuestions = questions.filter(q => !processedVariables.has(q.variable))
-      
+      const unprocessedQuestions = questions.filter((q) => !processedVariables.has(q.variable))
+
       if (unprocessedQuestions.length === 0) continue
 
       const variables = new Set()
@@ -1806,7 +1877,7 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
           surveyNumber: question.surveyNumber,
           surveyName: question.surveyName,
           date: question.date,
-          label: question.label || ''
+          label: question.label || "",
         })
       }
 
@@ -1815,7 +1886,7 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
 
       const group = {
         id: `${theme}-text-${groupIndex++}`,
-        type: 'text-grouped',
+        type: "text-grouped",
         questionText: questionText,
         shortText: questionText.length > 200 ? questionText.substring(0, 200) + "..." : questionText,
         theme: theme,
@@ -1826,22 +1897,22 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
         // Dados para usar no POST endpoint
         searchData: {
           theme: theme,
-          questionText: questionText
-        }
+          questionText: questionText,
+        },
       }
 
       finalGroups.push(group)
-      unprocessedQuestions.forEach(q => processedVariables.add(q.variable))
+      unprocessedQuestions.forEach((q) => processedVariables.add(q.variable))
     }
 
     // Ordenar os grupos finais
     finalGroups.sort((a, b) => {
       // Primeiro por tipo (múltiplas primeiro)
       if (a.type !== b.type) {
-        return a.type === 'multiple' ? -1 : 1
+        return a.type === "multiple" ? -1 : 1
       }
       // Depois por código base ou texto
-      if (a.type === 'multiple') {
+      if (a.type === "multiple") {
         return a.baseCode.localeCompare(b.baseCode)
       }
       return a.questionText.localeCompare(b.questionText)
@@ -1850,8 +1921,8 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
     console.log(`✅ Encontrados ${finalGroups.length} grupos de perguntas para o tema '${theme}'`)
 
     // Estatísticas
-    const multipleQuestions = finalGroups.filter(g => g.type === 'multiple')
-    const textGroupedQuestions = finalGroups.filter(g => g.type === 'text-grouped')
+    const multipleQuestions = finalGroups.filter((g) => g.type === "multiple")
+    const textGroupedQuestions = finalGroups.filter((g) => g.type === "text-grouped")
 
     res.json({
       success: true,
@@ -1861,25 +1932,32 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
         multipleQuestions: multipleQuestions.length,
         textGroupedQuestions: textGroupedQuestions.length,
         totalQuestionsProcessed: processedVariables.size,
-        totalQuestionsInTheme: allQuestions.length
+        totalQuestionsInTheme: allQuestions.length,
       },
       questionGroups: finalGroups,
       usage: {
         message: "Use os dados em 'searchData' para buscar o histórico completo da pergunta",
         endpoint: "POST /api/data/question/grouped/responses",
-        multipleQuestionsNote: "Para perguntas múltiplas, você pode buscar todas as subperguntas de uma vez usando o array 'variables'",
+        multipleQuestionsNote:
+          "Para perguntas múltiplas, você pode buscar todas as subperguntas de uma vez usando o array 'variables'",
         example: {
-          textGrouped: textGroupedQuestions.length > 0 ? {
-            theme: theme,
-            questionText: textGroupedQuestions[0].questionText
-          } : null,
-          multiple: multipleQuestions.length > 0 ? {
-            theme: theme,
-            variables: multipleQuestions[0].variables,
-            baseCode: multipleQuestions[0].baseCode
-          } : null
-        }
-      }
+          textGrouped:
+            textGroupedQuestions.length > 0
+              ? {
+                  theme: theme,
+                  questionText: textGroupedQuestions[0].questionText,
+                }
+              : null,
+          multiple:
+            multipleQuestions.length > 0
+              ? {
+                  theme: theme,
+                  variables: multipleQuestions[0].variables,
+                  baseCode: multipleQuestions[0].baseCode,
+                }
+              : null,
+        },
+      },
     })
   } catch (error) {
     console.error(`❌ Erro ao agrupar perguntas do tema:`, error)
@@ -1890,8 +1968,6 @@ router.get("/themes/:theme/questions-grouped", async (req, res) => {
     })
   }
 })
-
-
 
 // GET /api/data/themes/:theme/questions-summary
 // Resumo rápido das perguntas de um tema agrupadas
