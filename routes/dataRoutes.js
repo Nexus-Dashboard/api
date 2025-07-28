@@ -27,6 +27,10 @@ router.get("/themes/:theme/questions-grouped", themesController.getGroupedQuesti
 router.get("/themes/:theme/questions-summary", themesController.getQuestionsSummary)
 router.post("/themes/questions", themesController.postThemeQuestions)
 
+// ==================== ROTAS DE RESPOSTAS (ESPECÍFICAS PRIMEIRO) ====================
+// IMPORTANTE: Rotas específicas devem vir ANTES das rotas com parâmetros
+router.post("/question/grouped/responses", responsesController.getGroupedResponses)
+
 // ==================== ROTAS DE PERGUNTAS ====================
 router.get("/questions/all", questionsController.getAllQuestions)
 router.get("/question/:questionCode/responses", questionsController.getQuestionResponses)
@@ -36,9 +40,6 @@ router.get("/question/:questionCode/preview", questionsController.getQuestionPre
 router.get("/question/:questionCode/smart-search", questionsController.getSmartSearch)
 router.get("/question/:questionCode/comparison", questionsController.getQuestionComparison)
 router.post("/question/:questionCode/responses", questionsController.postQuestionResponses)
-
-// ==================== ROTAS DE RESPOSTAS ====================
-router.post("/question/grouped/responses", responsesController.getGroupedResponses)
 
 // ==================== ROTAS DE BUSCA ====================
 router.get("/search/questions", searchController.searchQuestions)

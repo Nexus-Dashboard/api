@@ -7,11 +7,18 @@ const getGroupedResponses = async (req, res) => {
     const dbKey = req.dbKey
     const { theme, questionText, variables, baseCode } = req.body
 
+    console.log(`🎯 [${dbKey}] Recebida requisição para respostas agrupadas:`)
+    console.log(`   📋 Theme: ${theme}`)
+    console.log(`   📋 QuestionText: ${questionText ? questionText.substring(0, 100) + "..." : "não fornecido"}`)
+    console.log(`   📋 Variables: ${variables ? variables.join(", ") : "não fornecido"}`)
+    console.log(`   📋 BaseCode: ${baseCode || "não fornecido"}`)
+
     // Validações
     if (!theme) {
       return res.status(400).json({
         success: false,
         message: "Campo 'theme' é obrigatório no body da requisição",
+        receivedBody: req.body,
       })
     }
 
@@ -19,6 +26,7 @@ const getGroupedResponses = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "É necessário fornecer 'questionText' ou 'variables' no body da requisição",
+        receivedBody: req.body,
       })
     }
 
@@ -38,39 +46,64 @@ const getGroupedResponses = async (req, res) => {
       console.log(`📋 Texto da pergunta: ${questionText.substring(0, 100)}...`)
       searchType = "text"
       const exactQuestionText = questionText.trim()
+
+      // Primeiro, tentar busca exata
       identicalQuestions = await QuestionIndex.find({
         index: theme,
         questionText: { $eq: exactQuestionText },
       }).lean()
 
-      console.log(`🔍 Buscando por texto EXATO: "${exactQuestionText}"`)
-      console.log(`📊 Perguntas encontradas: ${identicalQuestions.length}`)
+      console.log(`🔍 Busca exata encontrou: ${identicalQuestions.length} perguntas`)
 
-      if (identicalQuestions.length > 0) {
-        const uniqueTexts = [...new Set(identicalQuestions.map((q) => q.questionText))]
-        console.log(`📝 Textos únicos encontrados: ${uniqueTexts.length}`)
-        if (uniqueTexts.length > 1) {
-          console.warn(`⚠️ AVISO: Encontrados ${uniqueTexts.length} textos diferentes quando deveria ser apenas 1`)
-          uniqueTexts.forEach((text, index) => {
-            console.log(`   ${index + 1}: "${text.substring(0, 100)}..."`)
-          })
-        }
+      // Se não encontrou com busca exata, tentar busca por regex (mais flexível)
+      if (identicalQuestions.length === 0) {
+        console.log(`🔍 Tentando busca por regex...`)
+        const escapedText = exactQuestionText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        identicalQuestions = await QuestionIndex.find({
+          index: theme,
+          questionText: { $regex: escapedText, $options: "i" },
+        }).lean()
+        console.log(`🔍 Busca por regex encontrou: ${identicalQuestions.length} perguntas`)
+      }
+
+      // Se ainda não encontrou, buscar apenas por tema para debug
+      if (identicalQuestions.length === 0) {
+        console.log(`🔍 Debug: Buscando todas as perguntas do tema '${theme}'...`)
+        const allQuestionsInTheme = await QuestionIndex.find({ index: theme })
+          .select("variable questionText")
+          .limit(5)
+          .lean()
+
+        console.log(`📊 Primeiras 5 perguntas do tema '${theme}':`)
+        allQuestionsInTheme.forEach((q, index) => {
+          console.log(`   ${index + 1}. ${q.variable}: ${q.questionText.substring(0, 80)}...`)
+        })
       }
     }
 
     if (identicalQuestions.length === 0) {
+      // Buscar informações de debug
+      const themeExists = await QuestionIndex.findOne({ index: theme }).lean()
+      const totalQuestionsInTheme = await QuestionIndex.countDocuments({ index: theme })
+
       return res.status(404).json({
         success: false,
         type: dbKey,
         message:
           searchType === "multiple"
             ? `Nenhuma pergunta encontrada com as variáveis fornecidas no tema '${theme}' para o tipo '${dbKey}'.`
-            : `Nenhuma pergunta encontrada com o texto EXATO fornecido no tema '${theme}' para o tipo '${dbKey}'.`,
+            : `Nenhuma pergunta encontrada com o texto fornecido no tema '${theme}' para o tipo '${dbKey}'.`,
         searchDetails: {
           theme: theme,
+          themeExists: !!themeExists,
+          totalQuestionsInTheme: totalQuestionsInTheme,
           searchType: searchType,
           questionText: searchType === "text" ? questionText.substring(0, 200) + "..." : null,
           variables: searchType === "multiple" ? variables : null,
+        },
+        debug: {
+          receivedBody: req.body,
+          dbKey: dbKey,
         },
       })
     }
@@ -79,11 +112,11 @@ const getGroupedResponses = async (req, res) => {
     if (searchType === "text") {
       const uniqueQuestionTexts = [...new Set(identicalQuestions.map((q) => q.questionText))]
       if (uniqueQuestionTexts.length > 1) {
-        console.error(`❌ ERRO: Encontrados ${uniqueQuestionTexts.length} textos diferentes na busca por texto exato`)
+        console.error(`❌ ERRO: Encontrados ${uniqueQuestionTexts.length} textos diferentes na busca por texto`)
         return res.status(400).json({
           success: false,
           type: dbKey,
-          message: `Erro interno: busca por texto exato retornou ${uniqueQuestionTexts.length} textos diferentes`,
+          message: `Erro interno: busca por texto retornou ${uniqueQuestionTexts.length} textos diferentes`,
           foundTexts: uniqueQuestionTexts.map((text) => text.substring(0, 100) + "..."),
         })
       }
@@ -408,6 +441,7 @@ const getGroupedResponses = async (req, res) => {
       success: false,
       message: "Erro interno do servidor",
       error: error.message,
+      stack: process.env.NODE_ENV !== "production" ? error.stack : undefined,
     })
   }
 }
