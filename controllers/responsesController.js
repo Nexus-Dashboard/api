@@ -152,10 +152,10 @@ const getGroupedResponses = async (req, res) => {
 
     const demographicFields = [
       "UF",
-      "Regiao",
+      "REGIAO",
       "PF1",
       "PF2#1",
-      "PF2_faixas",
+      "PF2_FAIXAS",
       "PF3",
       "PF4",
       "PF5",
