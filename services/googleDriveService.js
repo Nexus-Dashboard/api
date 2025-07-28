@@ -5,12 +5,22 @@ class GoogleDriveService {
   constructor() {
     this.drive = null
     this.sheets = null
+    // IDs para pesquisas TELEFONICAS
     this.rootFolderId = "1PA_g6SLCYe_VIn5L7sT7a2CqOOu3v01b"
+
+    // IDs para pesquisas F2F (Face-to-Face)
+    this.f2fRootFolderId = "1_reWHktzuuOZ_NaNhYkZsSolfa3-2kbi"
+    this.f2fYearFolderIds = {
+      2023: "1QjkQMMuFDBxim7izUK1pdWhOUD1NST8_",
+      2024: "1TCJ4Oz36-o7iEVmv1zCipk3cst1e7SD7",
+      2025: "1o_gZ_oGjbVST4XvWFYC9Ta3OfjCcmVs0",
+    }
 
     // Cache para melhorar performance
     this.cache = {
       yearFolders: null,
       allSurveyFiles: null,
+      allF2FSurveyFiles: null, // Novo cache para F2F
       fileData: new Map(),
       questionData: new Map(),
       lastUpdate: null,
@@ -35,6 +45,7 @@ class GoogleDriveService {
     this.cache = {
       yearFolders: null,
       allSurveyFiles: null,
+      allF2FSurveyFiles: null,
       fileData: new Map(),
       questionData: new Map(),
       lastUpdate: null,
@@ -76,6 +87,21 @@ class GoogleDriveService {
       return response.data.files.filter((file) => file.mimeType === "application/vnd.google-apps.spreadsheet")
     } catch (error) {
       console.error("Erro ao listar arquivos de pesquisa:", error)
+      throw error
+    }
+  }
+
+  // NOVO: Método para listar arquivos de pesquisa F2F em uma pasta de ano
+  async listSurveyFilesInF2FYear(yearFolderId) {
+    try {
+      const response = await this.drive.files.list({
+        q: `'${yearFolderId}' in parents and trashed=false and name contains '(Google Sheets)'`,
+        fields: "files(id, name, mimeType, modifiedTime)",
+        orderBy: "name",
+      })
+      return response.data.files.filter((file) => file.mimeType === "application/vnd.google-apps.spreadsheet")
+    } catch (error) {
+      console.error("Erro ao listar arquivos de pesquisa F2F:", error)
       throw error
     }
   }
@@ -179,6 +205,49 @@ class GoogleDriveService {
       return result
     } catch (error) {
       console.error("Erro ao listar todos os arquivos de pesquisa:", error)
+      throw error
+    }
+  }
+
+  // NOVO: Método para listar todos os arquivos de pesquisa F2F
+  async listAllF2FSurveyFiles() {
+    try {
+      if (this.cache.allF2FSurveyFiles && this._isCacheValid()) {
+        return this.cache.allF2FSurveyFiles
+      }
+
+      const result = { totalYears: Object.keys(this.f2fYearFolderIds).length, years: {}, summary: [] }
+
+      const yearEntries = Object.entries(this.f2fYearFolderIds)
+
+      for (const [year, folderId] of yearEntries) {
+        const surveyFiles = await this.listSurveyFilesInF2FYear(folderId)
+        const data = {
+          folderId: folderId,
+          folderName: year,
+          totalFiles: surveyFiles.length,
+          files: surveyFiles.map((file) => ({
+            id: file.id,
+            name: file.name,
+            modifiedTime: file.modifiedTime,
+            rodada: this._extractRodada(file.name), // Tenta extrair rodada se houver
+          })),
+        }
+        result.years[year] = data
+        result.summary.push({
+          year: year,
+          totalFiles: data.totalFiles,
+          lastModified:
+            data.files.length > 0 ? Math.max(...data.files.map((f) => new Date(f.modifiedTime).getTime())) : null,
+        })
+      }
+
+      result.summary.sort((a, b) => b.year.localeCompare(a.year))
+      this.cache.allF2FSurveyFiles = result
+      this.cache.lastUpdate = Date.now()
+      return result
+    } catch (error) {
+      console.error("Erro ao listar todos os arquivos de pesquisa F2F:", error)
       throw error
     }
   }
