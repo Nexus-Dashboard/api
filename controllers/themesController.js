@@ -224,7 +224,8 @@ const getGroupedQuestions = async (req, res) => {
     // Processar perguntas agrupadas por texto
     let groupIndex = 0
     for (const [questionText, questions] of textGroups.entries()) {
-      const unprocessedQuestions = questions.filter((q) => !processedVariables.has(q.variable))
+      // Correção: Removida a filtragem por `processedVariables`
+      const unprocessedQuestions = questions; // Alteração aqui
 
       if (unprocessedQuestions.length === 0) continue
 
@@ -263,7 +264,7 @@ const getGroupedQuestions = async (req, res) => {
       }
 
       finalGroups.push(group)
-      unprocessedQuestions.forEach((q) => processedVariables.add(q.variable))
+      // Correção: Removida a adição a `processedVariables` para permitir que a mesma variável apareça em grupos de texto diferentes
     }
 
     finalGroups.sort((a, b) => {
@@ -289,7 +290,6 @@ const getGroupedQuestions = async (req, res) => {
         totalGroups: finalGroups.length,
         multipleQuestions: multipleQuestions.length,
         textGroupedQuestions: textGroupedQuestions.length,
-        totalQuestionsProcessed: processedVariables.size,
         totalQuestionsInTheme: allQuestions.length,
       },
       questionGroups: finalGroups,
