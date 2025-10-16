@@ -135,6 +135,14 @@ const getGroupedResponses = async (req, res) => {
       return acc
     }, {})
 
+    // Criar mapeamento de datas por rodada
+    const dateByRound = identicalQuestions.reduce((acc, q) => {
+      if (!acc[q.surveyNumber] && q.date) {
+        acc[q.surveyNumber] = q.date
+      }
+      return acc
+    }, {})
+
     // Criar filtro mais específico baseado nas combinações exatas rodada+variable
     const validCombinations = identicalQuestions.map((q) => ({
       variable: q.variable.toUpperCase(),
@@ -278,6 +286,7 @@ const getGroupedResponses = async (req, res) => {
           year: doc.year,
           rodada: doc.rodada,
           period: roundKey,
+          date: dateByRound[doc.rodada.toString()] || null,
           variables: variablesByRound[doc.rodada.toString()] || [],
           totalResponses: 0,
           totalWeightedResponses: 0,
