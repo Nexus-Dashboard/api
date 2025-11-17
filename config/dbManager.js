@@ -24,7 +24,7 @@ const connectionOptions = {
 }
 
 // Função de conexão agora aceita uma chave para identificar o banco de dados
-async function connectToDatabase(dbKey = "telephonic") {
+async function connectToDatabase(dbKey = "f2f") {
   let cached = global.mongooseConnections[dbKey]
   if (!cached) {
     cached = global.mongooseConnections[dbKey] = { conn: null, promise: null, models: {} }
@@ -37,7 +37,7 @@ async function connectToDatabase(dbKey = "telephonic") {
 
   if (!cached.promise) {
     // Seleciona a URI com base na chave
-    const uri = dbKey === "f2f" ? process.env.MONGODB_URI_SECUNDARIO : process.env.MONGODB_URI
+    const uri = dbKey === "telephonic" ? process.env.MONGODB_URI : process.env.MONGODB_URI_SECUNDARIO
 
     if (!uri) {
       throw new Error(`A variável de ambiente para a chave '${dbKey}' não está definida.`)
@@ -68,7 +68,7 @@ async function connectToDatabase(dbKey = "telephonic") {
 }
 
 // Função para obter um modelo do banco de dados especificado
-const getModel = async (modelName, dbKey = "telephonic") => {
+const getModel = async (modelName, dbKey = "f2f") => {
   const { models } = await connectToDatabase(dbKey)
   if (!models[modelName]) {
     // Tenta registrar o modelo se ele não existir (fallback)
@@ -84,7 +84,7 @@ const getModel = async (modelName, dbKey = "telephonic") => {
 }
 
 // Retorna o modelo da conexão especificada
-const getAllModels = async (modelName, dbKey = "telephonic") => {
+const getAllModels = async (modelName, dbKey = "f2f") => {
   const model = await getModel(modelName, dbKey)
   return [model]
 }

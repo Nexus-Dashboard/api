@@ -9,7 +9,7 @@ const responsesController = require("../controllers/responsesController")
 const searchController = require("../controllers/searchController")
 
 // Função auxiliar para determinar qual banco de dados usar
-const getDbKey = (req) => (req.query.type === "f2f" ? "f2f" : "telephonic")
+const getDbKey = (req) => (req.query.type === "telephonic" ? "telephonic" : "f2f")
 
 // Middleware para adicionar dbKey ao request
 const addDbKey = (req, res, next) => {

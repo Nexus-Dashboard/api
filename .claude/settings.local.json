@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run bq:check:*)",
+      "Bash(npm run bq:migrate-all:*)",
+      "Bash(npm run bq:cleanup:*)",
+      "Bash(timeout:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
