@@ -16,7 +16,8 @@ const authenticate = async (req, res, next) => {
     // Verificar e decodificar o token
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
 
-    const User = await getModel("User")
+    // IMPORTANTE: Users sempre no database f2f
+    const User = await getModel("User", "f2f")
 
     // Buscar usuário e selecionar campos necessários
     const user = await User.findById(decoded.id).select("-password")
@@ -90,8 +91,8 @@ const optionalAuth = async (req, res, next) => {
 
     if (token) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET)
-      // IMPORTANTE: Users estão no banco telephonic
-      const User = await getModel("User", "telephonic")
+      // IMPORTANTE: Users estão no database f2f
+      const User = await getModel("User", "f2f")
       const user = await User.findById(decoded.id).select("-password")
 
       if (user && user.isActive) {

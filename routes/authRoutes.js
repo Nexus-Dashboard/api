@@ -38,7 +38,8 @@ router.post("/register", async (req, res) => {
       })
     }
 
-    const User = await getModel("User")
+    // IMPORTANTE: Users sempre no database f2f
+    const User = await getModel("User", "f2f")
 
     // Verificar se o usuário já existe
     const existingUser = await User.findOne({ email })
@@ -98,7 +99,8 @@ router.post("/login", authLimiter, async (req, res) => {
       })
     }
 
-    const User = await getModel("User")
+    // IMPORTANTE: Users sempre no database f2f
+    const User = await getModel("User", "f2f")
 
     // Buscar usuário com senha
     const user = await User.findOne({ email }).select("+password")
@@ -207,7 +209,8 @@ router.put("/profile", authenticate, async (req, res) => {
     const { name, email } = req.body
     const userId = req.user._id
 
-    const User = await getModel("User")
+    // IMPORTANTE: Users sempre no database f2f
+    const User = await getModel("User", "f2f")
 
     // Verificar se o email já está em uso por outro usuário
     if (email && email !== req.user.email) {
@@ -276,7 +279,8 @@ router.put("/change-password", authenticate, async (req, res) => {
       })
     }
 
-    const User = await getModel("User")
+    // IMPORTANTE: Users sempre no database f2f
+    const User = await getModel("User", "f2f")
 
     // Buscar usuário com senha
     const user = await User.findById(req.user._id).select("+password")
