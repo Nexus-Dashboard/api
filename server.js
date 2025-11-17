@@ -20,6 +20,9 @@ const googleRoutes = require("./routes/googleRoutes")
 
 const app = express()
 
+// Configurar trust proxy para funcionar com Vercel/proxies reversos
+app.set('trust proxy', 1)
+
 app.use(cors())
 app.use(express.json({ limit: "50mb" }))
 

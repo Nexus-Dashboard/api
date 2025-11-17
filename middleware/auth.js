@@ -16,7 +16,6 @@ const authenticate = async (req, res, next) => {
     // Verificar e decodificar o token
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
 
-    // CORREÇÃO: Usar await getModel como no authRoutes.js que funciona
     const User = await getModel("User")
 
     // Buscar usuário e selecionar campos necessários
@@ -91,7 +90,8 @@ const optionalAuth = async (req, res, next) => {
 
     if (token) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET)
-      const User = await getModel("User")
+      // IMPORTANTE: Users estão no banco telephonic
+      const User = await getModel("User", "telephonic")
       const user = await User.findById(decoded.id).select("-password")
 
       if (user && user.isActive) {
