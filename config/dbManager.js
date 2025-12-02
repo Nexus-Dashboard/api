@@ -37,7 +37,18 @@ async function connectToDatabase(dbKey = "f2f") {
 
   if (!cached.promise) {
     // Seleciona a URI com base na chave
-    const uri = dbKey === "telephonic" ? process.env.MONGODB_URI : process.env.MONGODB_URI_SECUNDARIO
+    let uri
+    if (dbKey === "telephonic") {
+      uri = process.env.MONGODB_URI
+    } else if (dbKey === "f2f") {
+      uri = process.env.MONGODB_URI_SECUNDARIO
+    } else if (dbKey === "test") {
+      // Para o banco "test", usar a mesma conexão mas trocar o nome do database
+      uri = process.env.MONGODB_URI_SECUNDARIO.replace("/f2f?", "/test?")
+    } else {
+      // Default para f2f
+      uri = process.env.MONGODB_URI_SECUNDARIO
+    }
 
     if (!uri) {
       throw new Error(`A variável de ambiente para a chave '${dbKey}' não está definida.`)

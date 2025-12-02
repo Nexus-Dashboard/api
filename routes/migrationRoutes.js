@@ -753,4 +753,432 @@ router.get("/analyze-f2f-files", ensureServiceInitialized, async (req, res) => {
   }
 })
 
+// NOVO: Rota para migrar dados da collection 'test' para 'f2f'
+// GET /api/migration/migrate-test-to-f2f?dryRun=true&deleteTest=false&skipExisting=false
+router.get("/migrate-test-to-f2f", async (req, res) => {
+  try {
+    const { dryRun = "true", deleteTest = "false", skipExisting = "false" } = req.query
+
+    console.log("🚀 Iniciando migração de dados de 'test.responses' para 'f2f.responses'...")
+    console.log(`📊 Configurações:`)
+    console.log(`   - Modo simulação: ${dryRun}`)
+    console.log(`   - Deletar collection test após migração: ${deleteTest}`)
+    console.log(`   - Pular documentos já existentes: ${skipExisting}`)
+
+    // Conectar ao banco TEST (origem)
+    const TestResponse = await getModel("Response", "test")
+
+    // Conectar ao banco f2f (destino)
+    const F2FResponse = await getModel("Response", "f2f")
+    const F2FSurvey = await getModel("Survey", "f2f")
+
+    console.log("📊 Contando documentos na collection 'test.responses'...")
+    const totalDocs = await TestResponse.countDocuments()
+    console.log(`   Encontrados ${totalDocs} documentos na origem`)
+
+    // Se skipExisting=true, verificar quantos já foram migrados
+    let alreadyMigratedIds = new Set()
+    let alreadyMigratedCount = 0
+
+    if (skipExisting === "true") {
+      console.log("🔍 Verificando documentos já migrados...")
+
+      // Buscar todos os _id dos documentos já migrados no f2f
+      // Assumindo que os _id são preservados durante a migração
+      const migratedDocs = await F2FResponse.find({}, { _id: 1 }).lean()
+      alreadyMigratedIds = new Set(migratedDocs.map((doc) => doc._id.toString()))
+      alreadyMigratedCount = alreadyMigratedIds.size
+
+      console.log(`   ✅ ${alreadyMigratedCount} documentos já migrados`)
+      console.log(`   📝 ${totalDocs - alreadyMigratedCount} documentos restantes para migrar`)
+    }
+
+    const docsToMigrate = skipExisting === "true" ? totalDocs - alreadyMigratedCount : totalDocs
+
+    if (totalDocs === 0) {
+      return res.json({
+        success: false,
+        message: "Nenhum documento encontrado na collection 'test.responses'",
+        statistics: { totalFound: 0 },
+      })
+    }
+
+    if (skipExisting === "true" && docsToMigrate === 0) {
+      return res.json({
+        success: true,
+        message: "Todos os documentos já foram migrados!",
+        statistics: {
+          totalDocuments: totalDocs,
+          alreadyMigrated: alreadyMigratedCount,
+          remaining: 0,
+        },
+      })
+    }
+
+    // Se for dry run, buscar apenas amostra
+    if (dryRun === "true") {
+      console.log("📥 Buscando amostra de documentos para análise...")
+      const sampleDocs = await TestResponse.find({}).limit(10).lean()
+
+      let sampleDoc = null
+      let fields = []
+      if (sampleDocs.length > 0) {
+        sampleDoc = sampleDocs[0]
+        fields = Object.keys(sampleDoc)
+        console.log("📋 Campos encontrados:", fields.join(", "))
+      }
+
+      return res.json({
+        success: true,
+        message: "Análise dos dados (modo simulação)",
+        isDryRun: true,
+        statistics: {
+          totalDocuments: totalDocs,
+          alreadyMigrated: skipExisting === "true" ? alreadyMigratedCount : 0,
+          documentsToMigrate: docsToMigrate,
+          fields: fields,
+        },
+        sampleDocument: sampleDoc,
+        nextStep: "Execute com ?dryRun=false para iniciar a migração real",
+        warning: `A migração irá processar ${docsToMigrate.toLocaleString()} documentos em lotes de 1000`,
+        tip: skipExisting === "true" ? "Modo skipExisting ativado - apenas novos documentos serão migrados" : "Use &skipExisting=true para pular documentos já migrados",
+      })
+    }
+
+    // Migração real - processar em lotes com cursor para não sobrecarregar memória
+    console.log("\n💾 Iniciando migração em lotes (processamento com cursor)...")
+    const batchSize = 1000
+    let processedCount = 0
+    let skippedCount = 0
+    let insertedCount = 0
+    let errorCount = 0
+    let invalidCount = 0
+    const invalidDocs = []
+
+    // Usar cursor para processar documentos em lotes sem carregar tudo na memória
+    const cursor = TestResponse.find({}).lean().cursor({ batchSize: batchSize })
+
+    let batch = []
+    let batchNum = 0
+
+    for await (const doc of cursor) {
+      processedCount++
+
+      // Se skipExisting=true, verificar se o documento já foi migrado
+      if (skipExisting === "true" && alreadyMigratedIds.has(doc._id.toString())) {
+        skippedCount++
+        if (processedCount % 1000 === 0) {
+          console.log(`   ⏭️  Progresso: ${processedCount}/${totalDocs} processados (${skippedCount} pulados)`)
+        }
+        continue
+      }
+
+      try {
+        // Verificar se o documento tem os campos necessários
+        if (!doc.surveyId && !doc.surveyName) {
+          throw new Error("Documento sem surveyId ou surveyName")
+        }
+
+        // Se tiver surveyName mas não tiver surveyId, buscar ou criar a survey no banco f2f
+        let surveyId = doc.surveyId
+        if (!surveyId && doc.surveyName) {
+          const survey = await F2FSurvey.findOneAndUpdate(
+            { name: doc.surveyName },
+            {
+              $set: {
+                name: doc.surveyName,
+                year: doc.year || new Date().getFullYear(),
+                month: doc.rodada || doc.month,
+              },
+            },
+            { upsert: true, new: true },
+          )
+          surveyId = survey._id
+        }
+
+        // Criar o documento no formato Response
+        const responseDoc = {
+          surveyId: surveyId,
+          entrevistadoId: doc.entrevistadoId || doc.respondentId || `resp_${processedCount}`,
+          answers: doc.answers || [],
+          rodada: doc.rodada || null,
+          year: doc.year || new Date().getFullYear(),
+        }
+
+        // Validar que tem pelo menos um answer
+        if (!responseDoc.answers || responseDoc.answers.length === 0) {
+          throw new Error("Documento sem respostas (answers)")
+        }
+
+        batch.push(responseDoc)
+      } catch (error) {
+        invalidCount++
+        if (invalidDocs.length < 10) {
+          invalidDocs.push({
+            docId: doc._id,
+            error: error.message,
+          })
+        }
+      }
+
+      // Quando o lote atingir o tamanho desejado, inserir no banco
+      if (batch.length >= batchSize) {
+        batchNum++
+        const totalBatches = Math.ceil(totalDocs / batchSize)
+
+        try {
+          console.log(
+            `   📦 Inserindo lote ${batchNum}/${totalBatches} (${batch.length} documentos) - Processados: ${processedCount}/${totalDocs}`,
+          )
+          const result = await F2FResponse.insertMany(batch, { ordered: false })
+          insertedCount += result.length
+          console.log(`      ✅ ${result.length} documentos inseridos`)
+        } catch (error) {
+          console.log(`      ⚠️  Erro no lote: ${error.message}`)
+
+          // Tentar inserir um por um para identificar quais falharam
+          for (const docToInsert of batch) {
+            try {
+              await F2FResponse.create(docToInsert)
+              insertedCount++
+            } catch (err) {
+              errorCount++
+            }
+          }
+        }
+
+        // Limpar o lote
+        batch = []
+      }
+    }
+
+    // Inserir documentos restantes (último lote incompleto)
+    if (batch.length > 0) {
+      batchNum++
+      try {
+        console.log(`   📦 Inserindo lote final (${batch.length} documentos)...`)
+        const result = await F2FResponse.insertMany(batch, { ordered: false })
+        insertedCount += result.length
+        console.log(`      ✅ ${result.length} documentos inseridos`)
+      } catch (error) {
+        console.log(`      ⚠️  Erro no lote final: ${error.message}`)
+
+        for (const docToInsert of batch) {
+          try {
+            await F2FResponse.create(docToInsert)
+            insertedCount++
+          } catch (err) {
+            errorCount++
+          }
+        }
+      }
+    }
+
+    console.log(`\n✅ Processamento concluído!`)
+    console.log(`   📊 Total processado: ${processedCount}`)
+    if (skipExisting === "true") {
+      console.log(`   ⏭️  Documentos pulados (já existentes): ${skippedCount}`)
+    }
+    console.log(`   ✅ Documentos inseridos: ${insertedCount}`)
+    console.log(`   ⚠️  Documentos inválidos: ${invalidCount}`)
+    console.log(`   ❌ Erros de inserção: ${errorCount}`)
+
+    // Deletar da collection test se solicitado
+    let deletedCount = 0
+    if (deleteTest === "true") {
+      console.log("\n🗑️  Deletando documentos da collection 'test.responses'...")
+      const deleteResult = await TestResponse.deleteMany({})
+      deletedCount = deleteResult.deletedCount
+      console.log(`   ✅ ${deletedCount} documentos deletados da collection 'test.responses'`)
+    }
+
+    console.log("\n✅ Migração concluída!")
+
+    res.json({
+      success: true,
+      message: "Migração concluída com sucesso",
+      statistics: {
+        totalDocuments: totalDocs,
+        processedDocuments: processedCount,
+        skippedDocuments: skipExisting === "true" ? skippedCount : 0,
+        alreadyMigrated: skipExisting === "true" ? alreadyMigratedCount : 0,
+        validDocuments: insertedCount,
+        invalidDocuments: invalidCount,
+        insertedDocuments: insertedCount,
+        errorDocuments: errorCount,
+        deletedFromTest: deletedCount,
+      },
+      invalidDocumentsDetails: invalidDocs,
+      settings: {
+        dryRun: false,
+        deleteTest: deleteTest === "true",
+        skipExisting: skipExisting === "true",
+      },
+    })
+  } catch (error) {
+    console.error("❌ Erro durante a migração:", error)
+    res.status(500).json({
+      success: false,
+      error: "Erro interno no servidor durante a migração",
+      details: error.message,
+    })
+  }
+})
+
+// NOVO: Rota para continuar migração (migrar apenas restantes)
+// GET /api/migration/continue-test-to-f2f
+router.get("/continue-test-to-f2f", async (req, res) => {
+  try {
+    console.log("🔄 Continuando migração de onde parou...")
+
+    // Redirecionar para a rota principal com skipExisting=true
+    const { dryRun = "false", deleteTest = "false" } = req.query
+
+    // Conectar aos bancos para verificar status
+    const TestResponse = await getModel("Response", "test")
+    const F2FResponse = await getModel("Response", "f2f")
+
+    const totalInTest = await TestResponse.countDocuments()
+    const totalInF2F = await F2FResponse.countDocuments()
+    const remaining = totalInTest - totalInF2F
+
+    console.log(`📊 Status atual:`)
+    console.log(`   - Total na origem (test): ${totalInTest}`)
+    console.log(`   - Total no destino (f2f): ${totalInF2F}`)
+    console.log(`   - Restantes para migrar: ${remaining}`)
+
+    if (remaining <= 0) {
+      return res.json({
+        success: true,
+        message: "Migração já está completa! Todos os documentos foram migrados.",
+        statistics: {
+          totalInTest: totalInTest,
+          totalInF2F: totalInF2F,
+          remaining: 0,
+        },
+      })
+    }
+
+    // Se for dry run, apenas mostrar estatísticas
+    if (dryRun === "true") {
+      return res.json({
+        success: true,
+        message: "Status da migração (modo simulação)",
+        isDryRun: true,
+        statistics: {
+          totalInTest: totalInTest,
+          totalInF2F: totalInF2F,
+          remaining: remaining,
+        },
+        nextStep: `Execute GET /api/migration/migrate-test-to-f2f?dryRun=false&skipExisting=true para continuar`,
+        info: "A migração continuará de onde parou, pulando os documentos já migrados",
+      })
+    }
+
+    // Executar migração com skipExisting=true
+    console.log(`\n🚀 Iniciando continuação da migração...`)
+    console.log(`   Redirecionando para migração com skipExisting=true\n`)
+
+    // Chamar a função de migração interna (não vou duplicar código)
+    // Redirecionar para a rota principal
+    return res.redirect(
+      `/api/migration/migrate-test-to-f2f?dryRun=false&skipExisting=true&deleteTest=${deleteTest}`,
+    )
+  } catch (error) {
+    console.error("❌ Erro ao continuar migração:", error)
+    res.status(500).json({
+      success: false,
+      error: "Erro ao verificar status da migração",
+      details: error.message,
+    })
+  }
+})
+
+// NOVO: Rota para analisar dados da collection 'test'
+// GET /api/migration/analyze-test
+router.get("/analyze-test", async (req, res) => {
+  try {
+    console.log("🔍 Analisando dados da collection 'test.responses'...")
+
+    // Conectar ao banco TEST (terceiro banco de dados)
+    const TestResponse = await getModel("Response", "test")
+
+    console.log("📊 Contando documentos na collection 'test.responses'...")
+    const totalDocs = await TestResponse.countDocuments()
+    console.log(`   Encontrados ${totalDocs} documentos`)
+
+    if (totalDocs === 0) {
+      return res.json({
+        success: true,
+        message: "Collection 'test.responses' está vazia",
+        statistics: { totalDocuments: 0 },
+      })
+    }
+
+    // Buscar alguns documentos de exemplo
+    const sampleDocs = await TestResponse.find({}).limit(5).lean()
+
+    // Analisar campos
+    const fieldCounts = {}
+    const allFields = new Set()
+
+    for (const doc of sampleDocs) {
+      for (const field of Object.keys(doc)) {
+        allFields.add(field)
+        fieldCounts[field] = (fieldCounts[field] || 0) + 1
+      }
+    }
+
+    // Verificar estrutura
+    const structureAnalysis = {
+      hasSurveyId: sampleDocs.some((doc) => doc.surveyId),
+      hasSurveyName: sampleDocs.some((doc) => doc.surveyName),
+      hasAnswers: sampleDocs.some((doc) => doc.answers && doc.answers.length > 0),
+      hasEntrevistadoId: sampleDocs.some((doc) => doc.entrevistadoId),
+      hasRodada: sampleDocs.some((doc) => doc.rodada),
+      hasYear: sampleDocs.some((doc) => doc.year),
+    }
+
+    console.log("✅ Análise concluída")
+
+    res.json({
+      success: true,
+      message: "Análise da collection 'test' concluída",
+      statistics: {
+        totalDocuments: totalDocs,
+        samplesAnalyzed: sampleDocs.length,
+        uniqueFields: Array.from(allFields),
+        fieldOccurrences: fieldCounts,
+      },
+      structureAnalysis,
+      sampleDocuments: sampleDocs.slice(0, 2).map((doc) => ({
+        ...doc,
+        _id: doc._id.toString(),
+      })),
+      recommendations: [
+        structureAnalysis.hasSurveyId || structureAnalysis.hasSurveyName
+          ? "✅ Documentos têm identificação de pesquisa"
+          : "⚠️ Documentos não têm surveyId ou surveyName",
+        structureAnalysis.hasAnswers ? "✅ Documentos têm campo answers" : "⚠️ Documentos não têm campo answers",
+        structureAnalysis.hasEntrevistadoId
+          ? "✅ Documentos têm entrevistadoId"
+          : "⚠️ Documentos não têm entrevistadoId",
+      ],
+      nextSteps: [
+        "1. Verifique se a estrutura dos dados está correta",
+        "2. Execute a migração em modo teste: GET /api/migration/migrate-test-to-f2f?dryRun=true",
+        "3. Execute a migração real: GET /api/migration/migrate-test-to-f2f?dryRun=false",
+        "4. (Opcional) Delete os dados da collection test: adicione &deleteTest=true",
+      ],
+    })
+  } catch (error) {
+    console.error("❌ Erro durante análise:", error)
+    res.status(500).json({
+      success: false,
+      error: "Erro ao analisar collection 'test'",
+      details: error.message,
+    })
+  }
+})
+
 module.exports = router
