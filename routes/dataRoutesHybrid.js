@@ -14,7 +14,7 @@ const responsesController = require("../controllers/responsesController");
 
 // Middleware para determinar fonte de dados
 router.use((req, res, next) => {
-  req.dbKey = req.query.type === "f2f" ? "f2f" : "telephonic";
+  req.dbKey = req.query.type === "f2f" ? "f2f" : "telephonic"; // Aceita tanto 'telefonica' quanto 'telephonic'
   next();
 });
 
