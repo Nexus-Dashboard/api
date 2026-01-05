@@ -5,8 +5,11 @@ class GoogleDriveService {
   constructor() {
     this.drive = null
     this.sheets = null
-    // IDs para pesquisas TELEFONICAS
-    this.rootFolderId = "1PA_g6SLCYe_VIn5L7sT7a2CqOOu3v01b"
+    // IDs para pesquisas TELEFONICAS - pastas por ano
+    this.rootFolderId = null // Não usado para telefônicas, usa yearFolderIds diretamente
+    this.yearFolderIds = {
+      2025: "1b4zuiPji7j6SB2dSZacAXUsfp96zD_Go",
+    }
 
     // IDs para pesquisas F2F (Face-to-Face)
     this.f2fRootFolderId = "1_reWHktzuuOZ_NaNhYkZsSolfa3-2kbi"
@@ -58,15 +61,15 @@ class GoogleDriveService {
         return this.cache.yearFolders
       }
 
-      const response = await this.drive.files.list({
-        q: `'${this.rootFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-        fields: "files(id, name, modifiedTime)",
-        orderBy: "name",
-      })
+      // Usar os IDs de pastas de anos diretamente configurados
+      const yearFolders = Object.entries(this.yearFolderIds).map(([year, folderId]) => ({
+        id: folderId,
+        name: year,
+        modifiedTime: new Date().toISOString(),
+      }))
 
-      const yearFolders = response.data.files
-        .filter((folder) => /^20\d{2}$/.test(folder.name))
-        .sort((a, b) => b.name.localeCompare(a.name))
+      // Ordenar por ano (mais recente primeiro)
+      yearFolders.sort((a, b) => b.name.localeCompare(a.name))
 
       this.cache.yearFolders = yearFolders
       this.cache.lastUpdate = Date.now()
@@ -80,7 +83,7 @@ class GoogleDriveService {
   async listSurveyFilesInYear(yearFolderId) {
     try {
       const response = await this.drive.files.list({
-        q: `'${yearFolderId}' in parents and trashed=false and name contains '(Google Sheets)' and name contains 'BD - TRACKING - RODADA'`,
+        q: `'${yearFolderId}' in parents and trashed=false and name contains '(Google Sheets)' and name contains 'RODADA'`,
         fields: "files(id, name, mimeType, modifiedTime)",
         orderBy: "name",
       })

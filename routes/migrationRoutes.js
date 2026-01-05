@@ -1181,4 +1181,176 @@ router.get("/analyze-test", async (req, res) => {
   }
 })
 
+// NOVO: Rota para exportar databases para ZIP
+// GET /api/migration/export-databases?format=all
+router.get("/export-databases", async (req, res) => {
+  try {
+    const { format = "csv" } = req.query // csv, json, all
+
+    console.log("🚀 Iniciando exportação das databases...")
+    console.log(`   Formato solicitado: ${format}`)
+
+    const fs = require("fs")
+    const path = require("path")
+    const { Parser } = require("json2csv")
+    const archiver = require("archiver")
+
+    const EXPORT_DIR = path.join(__dirname, "..", "exports")
+    if (!fs.existsSync(EXPORT_DIR)) {
+      fs.mkdirSync(EXPORT_DIR, { recursive: true })
+    }
+
+    // Função para flatten responses
+    const flattenResponses = (responses) => {
+      return responses.map((response) => {
+        const flat = {
+          _id: response._id.toString(),
+          surveyId: response.surveyId ? response.surveyId.toString() : null,
+          entrevistadoId: response.entrevistadoId,
+          rodada: response.rodada,
+          year: response.year,
+          createdAt: response.createdAt,
+          updatedAt: response.updatedAt,
+        }
+        if (response.answers && Array.isArray(response.answers)) {
+          response.answers.forEach((answer) => {
+            if (answer.k) flat[answer.k] = answer.v
+          })
+        }
+        return flat
+      })
+    }
+
+    // Exportar para CSV
+    const exportToCSV = (data, filename) => {
+      if (data.length === 0) return null
+      const parser = new Parser()
+      const csv = parser.parse(data)
+      const filepath = path.join(EXPORT_DIR, filename)
+      fs.writeFileSync(filepath, csv, "utf8")
+      console.log(`   ✅ CSV: ${filename}`)
+      return filepath
+    }
+
+    // Exportar para JSON
+    const exportToJSON = (data, filename) => {
+      if (data.length === 0) return null
+      const filepath = path.join(EXPORT_DIR, filename)
+      fs.writeFileSync(filepath, JSON.stringify(data, null, 2), "utf8")
+      console.log(`   ✅ JSON: ${filename}`)
+      return filepath
+    }
+
+    const allFiles = []
+
+    // Exportar F2F
+    console.log("\n📁 Exportando F2F...")
+    const F2FResponse = await getModel("Response", "f2f")
+    const F2FSurvey = await getModel("Survey", "f2f")
+    const F2FQuestionIndex = await getModel("QuestionIndex", "f2f")
+
+    const f2fResponses = await F2FResponse.find({}).lean()
+    const f2fSurveys = await F2FSurvey.find({}).lean()
+    const f2fQuestions = await F2FQuestionIndex.find({}).lean()
+
+    console.log(`   ${f2fResponses.length} responses, ${f2fSurveys.length} surveys, ${f2fQuestions.length} questions`)
+
+    if (format === "all" || format === "csv") {
+      allFiles.push(exportToCSV(flattenResponses(f2fResponses), "f2f_responses.csv"))
+      allFiles.push(exportToCSV(f2fSurveys, "f2f_surveys.csv"))
+      allFiles.push(exportToCSV(f2fQuestions, "f2f_questionindexes.csv"))
+    }
+    if (format === "all" || format === "json") {
+      allFiles.push(exportToJSON(f2fResponses, "f2f_responses.json"))
+      allFiles.push(exportToJSON(f2fSurveys, "f2f_surveys.json"))
+      allFiles.push(exportToJSON(f2fQuestions, "f2f_questionindexes.json"))
+    }
+
+    // Exportar Telephonic
+    console.log("\n📁 Exportando Telephonic...")
+    const TelResponse = await getModel("Response", "telephonic")
+    const TelSurvey = await getModel("Survey", "telephonic")
+    const TelQuestionIndex = await getModel("QuestionIndex", "telephonic")
+
+    const telResponses = await TelResponse.find({}).lean()
+    const telSurveys = await TelSurvey.find({}).lean()
+    const telQuestions = await TelQuestionIndex.find({}).lean()
+
+    console.log(`   ${telResponses.length} responses, ${telSurveys.length} surveys, ${telQuestions.length} questions`)
+
+    if (format === "all" || format === "csv") {
+      allFiles.push(exportToCSV(flattenResponses(telResponses), "telephonic_responses.csv"))
+      allFiles.push(exportToCSV(telSurveys, "telephonic_surveys.csv"))
+      allFiles.push(exportToCSV(telQuestions, "telephonic_questionindexes.csv"))
+    }
+    if (format === "all" || format === "json") {
+      allFiles.push(exportToJSON(telResponses, "telephonic_responses.json"))
+      allFiles.push(exportToJSON(telSurveys, "telephonic_surveys.json"))
+      allFiles.push(exportToJSON(telQuestions, "telephonic_questionindexes.json"))
+    }
+
+    // Criar ZIP
+    console.log("\n📦 Criando arquivo ZIP...")
+    const timestamp = new Date().toISOString().replace(/:/g, "-").split(".")[0]
+    const zipFilename = `mongodb_export_${timestamp}.zip`
+    const zipPath = path.join(EXPORT_DIR, zipFilename)
+
+    const output = fs.createWriteStream(zipPath)
+    const archive = archiver("zip", { zlib: { level: 9 } })
+
+    archive.pipe(output)
+
+    const validFiles = allFiles.filter(Boolean)
+    validFiles.forEach((file) => {
+      if (fs.existsSync(file)) {
+        archive.file(file, { name: path.basename(file) })
+      }
+    })
+
+    // README
+    const readme = `
+MongoDB Export - ${new Date().toISOString()}
+
+Databases exportados:
+- F2F: ${f2fResponses.length} responses
+- Telephonic: ${telResponses.length} responses
+
+Formato: ${format}
+
+Para usar CSV: Abra com Excel ou Google Sheets
+Para usar JSON: Importe em seu código
+`
+    archive.append(readme, { name: "README.txt" })
+
+    await archive.finalize()
+    await new Promise((resolve) => output.on("close", resolve))
+
+    // Limpar arquivos individuais
+    validFiles.forEach((file) => {
+      try {
+        fs.unlinkSync(file)
+      } catch (err) {}
+    })
+
+    console.log(`✅ ZIP criado: ${zipFilename}`)
+
+    // Enviar para download
+    res.download(zipPath, zipFilename, (err) => {
+      if (err) console.error("Erro ao enviar arquivo:", err)
+      setTimeout(() => {
+        try {
+          fs.unlinkSync(zipPath)
+        } catch (e) {}
+      }, 10000)
+    })
+  } catch (error) {
+    console.error("❌ Erro ao exportar:", error)
+    res.status(500).json({
+      success: false,
+      error: "Erro ao exportar databases",
+      details: error.message,
+    })
+  }
+})
+
 module.exports = router
