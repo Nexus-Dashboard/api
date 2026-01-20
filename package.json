@@ -22,6 +22,8 @@
     "test:google-drive": "node scripts/test-google-drive-access.js",
     "migrate:cluster": "node scripts/migrate-cluster-telephonic.js",
     "copy:users": "node scripts/copy-users-to-f2f.js",
+    "security:update-password": "node scripts/update-compromised-password.js",
+    "security:clean-credentials": "node scripts/clean-hardcoded-credentials.js",
     "start:bigquery": "USE_BIGQUERY=true node server.js",
     "start:hybrid": "USE_BIGQUERY=true BIGQUERY_FALLBACK=true node server.js"
   },

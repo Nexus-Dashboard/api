@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(node scripts/check-f2f-sync-status.js:*)",
+      "Bash(powershell -Command \"Stop-Process -Id 25244 -Force\")",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(node -e:*)"
     ],
     "deny": [],
     "ask": []
