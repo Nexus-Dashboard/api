@@ -213,6 +213,7 @@ const getQuestionResponsesById = async (req, res) => {
       "PF8",
       "PF9",
       "PF10",
+      "PF15",
     ]
 
     for (const Response of responseModels) {

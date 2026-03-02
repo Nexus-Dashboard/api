@@ -62,7 +62,7 @@ const getQuestionResponses = async (req, res) => {
           questionCode: questionCodeDecoded,
           questionInfo,
           historicalData: data,
-          demographicFields: ['UF', 'Regiao', 'PF1', 'PF2_faixas', 'PF3', 'PF4', 'PF5'],
+          demographicFields: ['UF', 'Regiao', 'PF1', 'PF2_faixas', 'PF3', 'PF4', 'PF5', 'PF15'],
           availableRounds: surveyNumbers,
         };
       },
@@ -137,7 +137,7 @@ const getGroupedResponses = async (req, res) => {
           questionText: questionText || null,
           baseCode: baseCode || null,
           historicalData: data,
-          demographicFields: ['UF', 'Regiao', 'PF1', 'PF2_faixas', 'PF3', 'PF4', 'PF5'],
+          demographicFields: ['UF', 'Regiao', 'PF1', 'PF2_faixas', 'PF3', 'PF4', 'PF5', 'PF15'],
         };
       },
       // MongoDB function (fallback)

@@ -161,7 +161,7 @@ const getGroupedResponses = async (req, res) => {
     const demographicFields = [
       "UF",
       "REGIAO",
-      "PF1",      
+      "PF1",
       "PF2_FAIXAS",
       "PF3",
       "PF4",
@@ -172,6 +172,7 @@ const getGroupedResponses = async (req, res) => {
       "PF9",
       "PF10",
       "PF13",
+      "PF15",
     ]
 
     // Buscar dados APENAS das combinações específicas que têm o texto exato

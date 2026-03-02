@@ -9,7 +9,9 @@
       "Bash(powershell -Command \"Stop-Process -Id 25244 -Force\")",
       "Bash(netstat:*)",
       "Bash(findstr:*)",
-      "Bash(node -e:*)"
+      "Bash(node -e:*)",
+      "Bash(xargs grep -l \"multer\\\\|upload\\\\|file\\\\|FormData\")",
+      "Bash(grep -r \"app.use\\\\|router.post\" /c/Users/marco/OneDrive/Desktop/Nexus/api/routes/*.js)"
     ],
     "deny": [],
     "ask": []
