@@ -11,7 +11,8 @@
       "Bash(findstr:*)",
       "Bash(node -e:*)",
       "Bash(xargs grep -l \"multer\\\\|upload\\\\|file\\\\|FormData\")",
-      "Bash(grep -r \"app.use\\\\|router.post\" /c/Users/marco/OneDrive/Desktop/Nexus/api/routes/*.js)"
+      "Bash(grep -r \"app.use\\\\|router.post\" /c/Users/marco/OneDrive/Desktop/Nexus/api/routes/*.js)",
+      "Bash(grep -E \"\\\\.\\(js|ts\\)$\")"
     ],
     "deny": [],
     "ask": []

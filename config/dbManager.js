@@ -40,6 +40,8 @@ async function connectToDatabase(dbKey = "f2f") {
     let uri
     if (dbKey === "telephonic") {
       uri = process.env.MONGODB_URI
+    } else if (dbKey === "telephonic_archive") {
+      uri = process.env.MONGODB_URI_TELEPHONIC_ARCHIVE
     } else if (dbKey === "f2f") {
       uri = process.env.MONGODB_URI_SECUNDARIO
     } else if (dbKey === "test") {
@@ -94,8 +96,16 @@ const getModel = async (modelName, dbKey = "f2f") => {
   return models[modelName]
 }
 
-// Retorna o modelo da conexão especificada
+// Retorna modelos de todas as conexões relevantes para o dbKey.
+// Para "telephonic", busca também no banco arquivo (rodadas 1-50).
 const getAllModels = async (modelName, dbKey = "f2f") => {
+  if (dbKey === "telephonic" && process.env.MONGODB_URI_TELEPHONIC_ARCHIVE) {
+    const [mainModel, archiveModel] = await Promise.all([
+      getModel(modelName, "telephonic"),
+      getModel(modelName, "telephonic_archive"),
+    ])
+    return [mainModel, archiveModel]
+  }
   const model = await getModel(modelName, dbKey)
   return [model]
 }
