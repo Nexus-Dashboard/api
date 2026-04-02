@@ -277,10 +277,28 @@ const getGroupedResponses = async (req, res) => {
       })
     }
 
+    // Detectar padrão de faixa de renda (salário mínimo) para normalização PF15 → PF13
+    const INCOME_PATTERN = /\((?:até|mais de|ate)\s+\d|SM\b/i
+
+    const normalizeDemographics = (demographics) => {
+      // Se já tem PF13 com valores de faixa de renda, não precisa normalizar
+      if (demographics.PF13 && INCOME_PATTERN.test(demographics.PF13)) {
+        return demographics
+      }
+      // Se PF15 tem valores de faixa de renda, promovê-lo para PF13
+      if (demographics.PF15 && INCOME_PATTERN.test(demographics.PF15)) {
+        const normalized = { ...demographics, PF13: demographics.PF15 }
+        delete normalized.PF15
+        return normalized
+      }
+      return demographics
+    }
+
     // Processar dados - adaptado para perguntas múltiplas
     const processedData = new Map()
 
     for (const doc of rawData) {
+      doc.demographics = normalizeDemographics(doc.demographics)
       const roundKey = `${doc.year}-R${doc.rodada}`
       if (!processedData.has(roundKey)) {
         processedData.set(roundKey, {
