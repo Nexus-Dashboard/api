@@ -8,9 +8,19 @@ async function processSpecificQuestion(questionInfo, questionCodeDecoded, theme,
 
   // Buscar APENAS perguntas que tenham exatamente o mesmo questionText, variable E index (tema)
   const QuestionIndex = await getModel("QuestionIndex", dbKey)
+
+  // Normaliza variável para cobrir casos como P1 <-> P01
+  const normalizeVar = (v) => v.replace(/^(P)0+(\d)$/, "$1$2")
+  const normalizedCode = normalizeVar(questionCodeDecoded)
+  const variableVariants = [
+    questionCodeDecoded,
+    normalizedCode,
+    questionCodeDecoded.replace(/^(P)(\d)$/, "$10$2"), // P1 -> P01
+  ].filter((v, i, arr) => arr.indexOf(v) === i)
+
   const identicalQuestions = await QuestionIndex.find({
     questionText: questionInfo.questionText,
-    variable: questionCodeDecoded,
+    variable: { $in: variableVariants },
     index: questionInfo.index, // Usar o index da pergunta encontrada
   }).lean()
 
