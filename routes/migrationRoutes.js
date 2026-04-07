@@ -411,6 +411,96 @@ router.get("/sync-surveys", ensureServiceInitialized, async (req, res) => {
   }
 })
 
+// GET /api/migration/index-rounds
+// Retorna as rodadas (surveyNumber) únicas presentes no QuestionIndex do banco telephonic
+router.get("/index-rounds", async (req, res) => {
+  try {
+    const QuestionIndex = await getModel("QuestionIndex", "telephonic")
+    const rounds = await QuestionIndex.distinct("surveyNumber")
+    const sorted = rounds
+      .filter(Boolean)
+      .map((r) => String(r))
+      .sort((a, b) => Number(a) - Number(b))
+    res.status(200).json({ success: true, rounds: sorted })
+  } catch (error) {
+    console.error("Erro ao buscar rodadas do índice:", error)
+    res.status(500).json({ success: false, error: "Erro interno no servidor.", details: error.message })
+  }
+})
+
+// POST /api/migration/upload-survey
+// Recebe dados processados do dashboard e insere no banco telephonic
+// Body: { surveyName, rodada, year, responses: [{ entrevistadoId, answers: [{ k, v }] }] }
+router.post("/upload-survey", async (req, res) => {
+  try {
+    const { surveyName, rodada, year, responses } = req.body
+
+    if (!surveyName || !rodada || !year || !Array.isArray(responses) || responses.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Campos obrigatórios ausentes: surveyName, rodada, year, responses[]",
+      })
+    }
+
+    console.log(`📥 Upload manual recebido: "${surveyName}" | Rodada ${rodada} | Ano ${year} | ${responses.length} respostas`)
+
+    const Survey = await getModel("Survey", "telephonic")
+    const Response = await getModel("Response", "telephonic")
+
+    // Verificar se já existe survey com esse nome para essa rodada
+    const existingSurvey = await Survey.findOne({ name: surveyName, month: rodada, year })
+    if (existingSurvey) {
+      const existingCount = await Response.countDocuments({ surveyId: existingSurvey._id })
+      if (existingCount > 0) {
+        return res.status(409).json({
+          success: false,
+          error: `Pesquisa "${surveyName}" (Rodada ${rodada}/${year}) já foi importada com ${existingCount} respostas. Delete as respostas existentes antes de reimportar.`,
+        })
+      }
+    }
+
+    // Criar ou recuperar o Survey
+    const survey = await Survey.findOneAndUpdate(
+      { name: surveyName },
+      { $set: { year: Number(year), month: Number(rodada) } },
+      { upsert: true, new: true },
+    )
+
+    // Montar os documentos de Response
+    const responseDocs = responses.map((r) => ({
+      surveyId: survey._id,
+      entrevistadoId: String(r.entrevistadoId),
+      answers: r.answers.filter((a) => a.k && a.v !== null && a.v !== undefined && a.v !== ""),
+      rodada: Number(rodada),
+      year: Number(year),
+    }))
+
+    // Inserir em lotes de 500 para não sobrecarregar
+    const batchSize = 500
+    let inserted = 0
+    for (let i = 0; i < responseDocs.length; i += batchSize) {
+      const batch = responseDocs.slice(i, i + batchSize)
+      await Response.insertMany(batch, { ordered: false })
+      inserted += batch.length
+      console.log(`   ✅ Lote ${Math.floor(i / batchSize) + 1}: ${batch.length} respostas inseridas (total: ${inserted})`)
+    }
+
+    console.log(`✅ Upload concluído: ${inserted} respostas inseridas para "${surveyName}"`)
+
+    res.status(200).json({
+      success: true,
+      message: `Pesquisa "${surveyName}" importada com sucesso!`,
+      surveyId: survey._id,
+      responsesInserted: inserted,
+      rodada,
+      year,
+    })
+  } catch (error) {
+    console.error("❌ Erro no upload manual da pesquisa:", error)
+    res.status(500).json({ success: false, error: "Erro interno no servidor.", details: error.message })
+  }
+})
+
 // NOVO: Rota para migrar dados F2F para o banco secundário COM FILTROS DE TAMANHO
 // GET /api/migration/sync-f2f-surveys?skipLargeFiles=true&maxResponses=15000&skipRounds=03,06,08,09
 router.get("/sync-f2f-surveys", ensureServiceInitialized, async (req, res) => {
