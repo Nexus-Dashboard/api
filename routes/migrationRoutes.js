@@ -36,14 +36,18 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 router.get("/sync-index", ensureServiceInitialized, async (req, res) => {
   try {
     const QuestionIndex = await getModel("QuestionIndex", "telephonic")
-    const indexFileId = "1FurphB54po2Pu-ganTcYqHTMZ7leHuWl_g9hodmhAco"
+    const indexFileId = "1h27lqHA9TD0IqM6A9M5JE8KyB7LySUt08dvBdCdyx0o"
     console.log(`Iniciando sincronização do índice de perguntas para o banco [telephonic]...`)
 
     const fileData = await driveService.readGoogleSheetsFile(indexFileId)
-    const sheet = fileData.sheets["base"]
+    // Aba pode ser "Página1", "base" ou a primeira disponível
+    const sheetName = fileData.sheets["Página1"] ? "Página1"
+      : fileData.sheets["base"] ? "base"
+      : fileData.sheetNames?.[0]
+    const sheet = fileData.sheets[sheetName]
 
     if (!sheet || sheet.length < 2) {
-      return res.status(400).json({ error: "Planilha de índice não encontrada ou vazia." })
+      return res.status(400).json({ error: `Planilha de índice não encontrada ou vazia (aba: ${sheetName}).` })
     }
 
     const headers = sheet[0].map((h) => h.trim())
