@@ -143,9 +143,22 @@ const getGroupedResponses = async (req, res) => {
       return acc
     }, {})
 
+    // Gera as duas formas da variável (P1 <-> P01) para tolerar divergência de
+    // rotulação entre o índice (ex.: "P1" nas rodadas novas) e as respostas, que
+    // são normalizadas para "P01" no upload do dashboard. Sem isso, rodadas com
+    // rótulo divergente no índice somem do gráfico.
+    const variableVariants = (v) => {
+      const up = String(v).toUpperCase()
+      const set = new Set([up])
+      set.add(up.replace(/^P0+(\d)$/, "P$1")) // P01 -> P1
+      set.add(up.replace(/^P(\d)$/, "P0$1")) // P1 -> P01
+      return [...set]
+    }
+
     // Criar filtro mais específico baseado nas combinações exatas rodada+variable
     const validCombinations = identicalQuestions.map((q) => ({
       variable: q.variable.toUpperCase(),
+      variants: variableVariants(q.variable),
       rodada: Number.parseInt(q.surveyNumber),
       questionText: q.questionText,
     }))
@@ -184,7 +197,7 @@ const getGroupedResponses = async (req, res) => {
         const pipeline = [
           {
             $match: {
-              "answers.k": combo.variable,
+              "answers.k": { $in: combo.variants },
               rodada: combo.rodada,
             },
           },
@@ -197,7 +210,7 @@ const getGroupedResponses = async (req, res) => {
               answers: {
                 $filter: {
                   input: "$answers",
-                  cond: { $eq: ["$$this.k", combo.variable] },
+                  cond: { $in: ["$$this.k", combo.variants] },
                 },
               },
               weight: {
