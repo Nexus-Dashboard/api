@@ -433,11 +433,18 @@ router.get("/index-rounds", async (req, res) => {
 })
 
 // POST /api/migration/upload-survey
-// Recebe dados processados do dashboard e insere no banco telephonic
-// Body: { surveyName, rodada, year, responses: [{ entrevistadoId, answers: [{ k, v }] }] }
+// Recebe dados processados do dashboard e insere no banco telephonic.
+// O dashboard envia os dados em LOTES (chunks) para respeitar o limite de
+// 4.5 MB de corpo de requisição das funções serverless da Vercel.
+// Body: {
+//   surveyName, rodada, year,
+//   responses: [{ entrevistadoId, answers: [{ k, v }] }],
+//   chunkIndex,   // opcional: índice do lote (0-based). Ausente/0 = primeiro lote
+//   totalChunks,  // opcional: total de lotes
+// }
 router.post("/upload-survey", async (req, res) => {
   try {
-    const { surveyName, rodada, year, responses } = req.body
+    const { surveyName, rodada, year, responses, chunkIndex, totalChunks } = req.body
 
     if (!surveyName || !rodada || !year || !Array.isArray(responses) || responses.length === 0) {
       return res.status(400).json({
@@ -446,31 +453,39 @@ router.post("/upload-survey", async (req, res) => {
       })
     }
 
-    console.log(`📥 Upload manual recebido: "${surveyName}" | Rodada ${rodada} | Ano ${year} | ${responses.length} respostas`)
+    const idx = Number(chunkIndex) || 0
+    const total = Number(totalChunks) || 1
+    const isFirstChunk = idx === 0
+
+    console.log(
+      `📥 Upload "${surveyName}" | Rodada ${rodada} | Ano ${year} | lote ${idx + 1}/${total} | ${responses.length} respostas`,
+    )
 
     const Survey = await getModel("Survey", "telephonic")
     const Response = await getModel("Response", "telephonic")
 
-    // Verificar se já existe survey com esse nome para essa rodada
-    const existingSurvey = await Survey.findOne({ name: surveyName, month: rodada, year })
-    if (existingSurvey) {
-      const existingCount = await Response.countDocuments({ surveyId: existingSurvey._id })
-      if (existingCount > 0) {
-        return res.status(409).json({
-          success: false,
-          error: `Pesquisa "${surveyName}" (Rodada ${rodada}/${year}) já foi importada com ${existingCount} respostas. Delete as respostas existentes antes de reimportar.`,
-        })
+    // No PRIMEIRO lote, verificar se a pesquisa já foi importada (evita duplicação)
+    if (isFirstChunk) {
+      const existingSurvey = await Survey.findOne({ name: surveyName, month: Number(rodada), year: Number(year) })
+      if (existingSurvey) {
+        const existingCount = await Response.countDocuments({ surveyId: existingSurvey._id })
+        if (existingCount > 0) {
+          return res.status(409).json({
+            success: false,
+            error: `Pesquisa "${surveyName}" (Rodada ${rodada}/${year}) já foi importada com ${existingCount} respostas. Delete as respostas existentes antes de reimportar.`,
+          })
+        }
       }
     }
 
-    // Criar ou recuperar o Survey
+    // Criar ou recuperar o Survey (idempotente entre lotes)
     const survey = await Survey.findOneAndUpdate(
       { name: surveyName },
       { $set: { year: Number(year), month: Number(rodada) } },
       { upsert: true, new: true },
     )
 
-    // Montar os documentos de Response
+    // Montar os documentos de Response deste lote
     const responseDocs = responses.map((r) => ({
       surveyId: survey._id,
       entrevistadoId: String(r.entrevistadoId),
@@ -479,23 +494,24 @@ router.post("/upload-survey", async (req, res) => {
       year: Number(year),
     }))
 
-    // Inserir em lotes de 500 para não sobrecarregar
+    // Inserir em sub-lotes de 500 para não sobrecarregar o banco
     const batchSize = 500
     let inserted = 0
     for (let i = 0; i < responseDocs.length; i += batchSize) {
       const batch = responseDocs.slice(i, i + batchSize)
       await Response.insertMany(batch, { ordered: false })
       inserted += batch.length
-      console.log(`   ✅ Lote ${Math.floor(i / batchSize) + 1}: ${batch.length} respostas inseridas (total: ${inserted})`)
     }
 
-    console.log(`✅ Upload concluído: ${inserted} respostas inseridas para "${surveyName}"`)
+    console.log(`   ✅ Lote ${idx + 1}/${total} concluído: ${inserted} respostas inseridas`)
 
     res.status(200).json({
       success: true,
-      message: `Pesquisa "${surveyName}" importada com sucesso!`,
+      message: `Lote ${idx + 1}/${total} de "${surveyName}" importado com sucesso!`,
       surveyId: survey._id,
       responsesInserted: inserted,
+      chunkIndex: idx,
+      totalChunks: total,
       rodada,
       year,
     })
