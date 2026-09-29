@@ -17,6 +17,7 @@ const maintenanceRoutes = require("./routes/maintenanceRoutes")
 const authRoutes = require("./routes/authRoutes")
 const userRoutes = require("./routes/userRoutes")
 const googleRoutes = require("./routes/googleRoutes")
+const clientRoutes = require("./routes/clients")
 
 const app = express()
 
@@ -52,6 +53,7 @@ app.get("/", (req, res) => {
       health: "/api/data/health",
       migration: "/api/migration",
       maintenance: "/api/maintenance",
+      clients: "/api/clients",
     },
   })
 })
@@ -63,6 +65,7 @@ app.use("/api/data", dataRoutes)
 app.use("/api/migration", migrationRoutes)
 app.use("/api/maintenance", maintenanceRoutes)
 app.use("/api/google", googleRoutes)
+app.use("/api/clients", clientRoutes)
 
 // 404
 app.use("*", (req, res) => {

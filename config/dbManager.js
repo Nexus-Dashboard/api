@@ -47,6 +47,9 @@ async function connectToDatabase(dbKey = "f2f") {
     } else if (dbKey === "test") {
       // Para o banco "test", usar a mesma conexão mas trocar o nome do database
       uri = process.env.MONGODB_URI_SECUNDARIO.replace("/f2f?", "/test?")
+    } else if (dbKey === "clients") {
+      // Banco de autenticação dos clientes SESC/SENAC (ver config/clientDb.js)
+      uri = process.env.MONGODB_URI_CLIENTS
     } else {
       // Default para f2f
       uri = process.env.MONGODB_URI_SECUNDARIO
