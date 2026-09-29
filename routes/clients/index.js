@@ -9,6 +9,7 @@ const rateLimit = require("express-rate-limit")
 
 const authRoutes = require("./authRoutes")
 const adminRoutes = require("./adminRoutes")
+const surveyRoutes = require("./surveyRoutes")
 
 const router = express.Router()
 
@@ -44,6 +45,8 @@ router.get("/", (req, res) => {
       scopeCheck: "GET /api/clients/auth/scope/check",
       regions: "GET /api/clients/auth/meta/regions",
       admin: "/api/clients/users (requer papel nexus_admin)",
+      surveys: "GET /api/clients/surveys",
+      surveyData: "GET /api/clients/surveys/:surveyId/data",
     },
   })
 })
@@ -51,5 +54,6 @@ router.get("/", (req, res) => {
 router.use("/auth/login", clientAuthLimiter)
 router.use("/auth", authRoutes)
 router.use("/users", adminRoutes)
+router.use("/surveys", surveyRoutes)
 
 module.exports = router
