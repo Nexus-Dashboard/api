@@ -35,6 +35,7 @@ Lista as pesquisas que o usuário pode abrir.
 | 403 | `SURVEY_FORBIDDEN` | a pesquisa é de outro cliente (ex.: `senac-*` pedindo `populacao`) |
 | 403 | `OUT_OF_SCOPE` | `state_user` sem UF |
 | 404 | `SURVEY_NOT_FOUND` | id desconhecido |
+| 503 | `SURVEY_NOT_CONFIGURED` | pesquisa registrada, mas ainda sem planilha (`fileId` vazio) |
 | 502 | `SURVEY_SOURCE_ERROR` / `SURVEY_SCHEMA_ERROR` | falha ao ler o Google Sheets, ou planilha sem as colunas esperadas |
 
 Cabeçalhos: `Cache-Control: private, max-age=300` e `Vary: Authorization`.
@@ -102,6 +103,27 @@ Os pesos amostrais seguem a distribuição populacional:
 Por isso, alguém com conhecimento técnico que baixe o payload e analise os pesos consegue **inferir aproximadamente** a região, ou o grupo de estados, das linhas mascaradas. O dashboard nunca mostra isso.
 
 Para eliminar o risco, o caminho é agregar no servidor: devolver só frequências ponderadas por pergunta e nenhuma linha individual.
+
+## Pesquisas registradas
+
+| id | cliente | peso | UF (só para a máscara) | colunas removidas |
+|---|---|---|---|---|
+| `populacao` | sesc | `weights.rf` | `uf_cotas` (nome) | `SbjNum`, `uf_cotas`, `Região` |
+| `stakeholders` | sesc | `Peso` | `PF3.1` / `PF8` (código 1–27) | `Response_ID`, `PF3.1`, `PF8`, `P14_O`, pesos por público |
+| `senac-populacao` | senac | `weights.rf` | `PF4` (código 1–27) | `SbjNum`, `PF4`, `PF5` (cidade), `Regiao`, `PF3_3_OUT`, `Q_79_S` |
+| `senac-empresarios` | senac | `weights` | `PF7_1` (sigla) | `idEntrevista`, `PF7_1`, `PF6` (região), `PF8_cod_1`, `PF8_1` (cidade), `PF2_1`, `PF1_t`, `P14_6_t` |
+
+As colunas de cidade também são removidas, porque revelariam a UF.
+
+**Opções por pesquisa** (em `config/clientSurveys.js`):
+- **`geo.kind`:**
+  - `ufName`: nome do estado, sem diferenciar acento ou caixa;
+  - `ufCode`: código 1–27 em ordem alfabética, usando `ALPHABETICAL_UF_CODES`;
+  - `ufSigla`: sigla da UF.
+- **`valueRender`:** padrão `FORMATTED_VALUE`. As bases do Senac usam `UNFORMATTED_VALUE`, para ler pesos e indicadores com precisão total, sem depender da formatação da planilha.
+- **`nullTokens`:** textos tratados como branco. Nas bases do Senac é `#NULL!`, o valor ausente do SPSS.
+- **`sheet`:** quando vem `null`, a API lê a primeira aba da planilha.
+- **`fileId`:** quando está vazio, a rota responde `503 SURVEY_NOT_CONFIGURED` até a planilha ser configurada.
 
 ## Cache e desempenho
 

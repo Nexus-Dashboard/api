@@ -18,7 +18,7 @@
 // mascaradas.
 
 const googleAuth = require("../config/googleAuth")
-const { UF_LABELS, getRegionSafe } = require("../utils/brazilRegions")
+const { UF_LABELS, getRegionSafe, normalizeUF } = require("../utils/brazilRegions")
 
 const CACHE_TTL_MS = 15 * 60 * 1000
 
@@ -92,6 +92,11 @@ function resolveUF(survey, row, index) {
       const uf = geo.codes[code - 1]
       if (uf) return uf
     }
+
+    if (geo.kind === "ufSigla") {
+      const uf = normalizeUF(raw)
+      if (uf) return uf
+    }
   }
 
   return null
@@ -132,10 +137,18 @@ function buildDataset(survey, rows, meta) {
     throw error
   }
 
+  // Marcadores de ausência da origem (ex.: "#NULL!" do SPSS) valem como branco
+  const nullTokens = new Set(survey.nullTokens || [])
+  const cell = (value) => {
+    if (value === undefined || value === null) return ""
+    const textValue = String(value).trim()
+    return nullTokens.has(textValue) ? "" : textValue
+  }
+
   // Sheets corta células vazias no fim da linha: completa até o tamanho do cabeçalho
   const records = body
-    .filter((row) => row.some((cell) => cell !== null && cell !== undefined && String(cell).trim() !== ""))
-    .map((row) => header.map((_, i) => (row[i] === undefined || row[i] === null ? "" : String(row[i]).trim())))
+    .map((row) => header.map((_, i) => cell(row[i])))
+    .filter((row) => row.some((value) => value !== ""))
 
   const excluded = new Set([...survey.dropColumns, survey.weightColumn])
   const numeric = new Set(survey.numericColumns)
@@ -156,7 +169,8 @@ function buildDataset(survey, rows, meta) {
     } else if (numeric.has(name)) {
       columns[name] = { type: "num", data: values.map(parseNumber) }
     } else {
-      const codes = values.map((value) => (value === "" ? 0 : Number(value)))
+      // Aceita códigos gravados como "4,00" / "4.00" (recodificações do SPSS)
+      const codes = values.map((value) => (value === "" ? 0 : parseNumber(value) ?? NaN))
       if (codes.every((code) => Number.isInteger(code) && code >= 0 && code <= 0xffff)) {
         columns[name] = { type: "code", ...encodeCodes(codes) }
       } else {
@@ -190,16 +204,30 @@ function buildDataset(survey, rows, meta) {
   }
 }
 
+async function resolveSheetName(sheets, survey) {
+  if (survey.sheet) return survey.sheet
+  // Sem aba configurada: usa a primeira aba da planilha
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: survey.fileId, fields: "sheets.properties.title" })
+  return meta.data.sheets[0].properties.title
+}
+
 async function fetchSheet(survey) {
+  if (!survey.fileId) {
+    const error = new Error(`Pesquisa ${survey.id} sem planilha configurada`)
+    error.code = "SURVEY_NOT_CONFIGURED"
+    throw error
+  }
+
   await ensureGoogle()
   const sheets = googleAuth.getSheets()
   const drive = googleAuth.getDrive()
+  const sheetName = await resolveSheetName(sheets, survey)
 
   const [values, info] = await Promise.all([
     sheets.spreadsheets.values.get({
       spreadsheetId: survey.fileId,
-      range: `'${survey.sheet.replace(/'/g, "''")}'`,
-      valueRenderOption: "FORMATTED_VALUE",
+      range: `'${sheetName.replace(/'/g, "''")}'`,
+      valueRenderOption: survey.valueRender || "FORMATTED_VALUE",
     }),
     drive.files
       .get({ fileId: survey.fileId, fields: "name, modifiedTime" })
@@ -295,6 +323,7 @@ function clearCache() {
 
 module.exports = {
   CACHE_TTL_MS,
+  buildDataset,
   GEO_OUTSIDE,
   GEO_REGION,
   GEO_STATE,

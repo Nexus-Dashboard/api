@@ -63,6 +63,13 @@ router.get("/:surveyId/data", async (req, res) => {
     return res.json({ success: true, ...payload })
   } catch (error) {
     console.error(`❌ Erro ao carregar a pesquisa ${survey.id}:`, error.message)
+    if (error.code === "SURVEY_NOT_CONFIGURED") {
+      return res.status(503).json({
+        success: false,
+        code: "SURVEY_NOT_CONFIGURED",
+        message: "Esta pesquisa ainda não está disponível.",
+      })
+    }
     return res.status(502).json({
       success: false,
       code: error.code === "SURVEY_SCHEMA_ERROR" ? "SURVEY_SCHEMA_ERROR" : "SURVEY_SOURCE_ERROR",
